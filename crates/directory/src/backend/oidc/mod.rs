@@ -36,6 +36,11 @@ pub struct DiscoveryDocument {
     pub userinfo_endpoint: String,
     pub token_endpoint: String,
     pub authorization_endpoint: String,
+    /// Optional private extension used by deployments that deliberately expose the
+    /// same primary password to legacy mail protocols. The endpoint returns no profile
+    /// or hash; it only verifies a Basic username/password over HTTPS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_verification_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_session_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +66,7 @@ pub struct OpenIdDirectory {
     pub discovery: OidcDiscovery,
     http: Client,
     cache: RwLock<JwksCache>,
+    basic_auth_token: Option<String>,
 }
 
 #[derive(Debug)]
