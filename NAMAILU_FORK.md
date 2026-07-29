@@ -26,6 +26,7 @@ docker build -f Dockerfile.namailu \
   -t namailu/stalwart:v0.16.14-unified-password .
 ```
 
-The fork remains licensed under the upstream AGPL-3.0-only option. Source for the
-running modified version is published at
-<https://git.facilitygo.com/filip/stalwart>.
+The fork remains licensed under the upstream AGPL-3.0-only option. Its canonical
+public source location is <https://git.facilitygo.com/filip/stalwart>. The
+running build is commit `831f3dc` on branch `namailu-unified-password`; creating
+the empty public repository is the only remaining publication step.
