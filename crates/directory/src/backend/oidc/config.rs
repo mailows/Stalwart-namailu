@@ -10,7 +10,7 @@ use crate::backend::oidc::{
     DiscoveryDocument, JwksCache, OidcConfig, OidcDiscovery, OidcError, OpenIdDirectory,
 };
 use registry::schema::structs;
-use reqwest::Client;
+use reqwest::{Client, redirect::Policy};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use trc::AuthEvent;
@@ -34,7 +34,11 @@ impl OpenIdDirectory {
     pub async fn new(config: OidcConfig) -> Result<Self, OidcError> {
         let http = Client::builder()
             .user_agent("Stalwart/1.0")
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(10))
+            // Credentials must never be redirected or inherited by a proxy from the
+            // process environment. The endpoint is a fixed, same-host HTTPS target.
+            .redirect(Policy::none())
+            .no_proxy()
             .build()
             .map_err(|e| OidcError::Network(format!("HTTP client build failed: {e}")))?;
         let discovery_url = format!(
@@ -61,6 +65,25 @@ impl OpenIdDirectory {
                 "Issuer mismatch: discovery document says '{}' but configured issue_url is '{}'",
                 discovery.issuer, config.issue_url,
             )));
+        }
+
+        if let Some(endpoint) = &discovery.password_verification_endpoint {
+            let endpoint_url = reqwest::Url::parse(endpoint).map_err(|err| {
+                OidcError::Provider(format!("Invalid password_verification_endpoint URL: {err}"))
+            })?;
+            let issuer_url = reqwest::Url::parse(&discovery.issuer)
+                .map_err(|err| OidcError::Provider(format!("Invalid issuer URL: {err}")))?;
+            if endpoint_url.scheme() != "https"
+                || endpoint_url.host_str() != issuer_url.host_str()
+                || endpoint_url.username() != ""
+                || endpoint_url.password().is_some()
+            {
+                return Err(OidcError::Provider(
+                    "password_verification_endpoint must be HTTPS, contain no userinfo, \
+                     and use the same hostname as the issuer"
+                        .to_string(),
+                ));
+            }
         }
 
         if let Some(supported) = &discovery.scopes_supported {
@@ -140,6 +163,11 @@ impl OpenIdDirectory {
             config,
             http,
             cache,
+            // Deployment-specific service identity. It is intentionally not part of
+            // the public registry object or discovery document and is never logged.
+            basic_auth_token: std::env::var("STALWART_OIDC_BASIC_AUTH_TOKEN")
+                .ok()
+                .filter(|token| !token.is_empty()),
         })
     }
 }

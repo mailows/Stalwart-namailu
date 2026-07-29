@@ -35,9 +35,89 @@ impl OpenIdDirectory {
                 }
                 err => AuthEvent::Error.into_err().reason(err),
             }),
-            _ => Err(AuthEvent::Error
-                .into_err()
-                .reason("Unsupported credentials type for OIDC backend")),
+            Credentials::Basic {
+                username, secret, ..
+            } => self
+                .authenticate_basic(username, secret)
+                .await
+                .map_err(|err| match err {
+                    OidcError::AuthorizationFailed(reason) => {
+                        AuthEvent::Failed.into_err().reason(reason)
+                    }
+                    err => AuthEvent::Error.into_err().reason(err),
+                }),
+        }
+    }
+
+    /// Verify a legacy mail-protocol password against the OIDC provider's private
+    /// password oracle. The provider remains the only password/hash authority.
+    ///
+    /// This is deliberately narrower than OAuth's removed password grant: no token,
+    /// profile, hash or session is returned. App passwords are still handled earlier
+    /// in `Server::route_auth_request` and never reach this endpoint.
+    async fn authenticate_basic(&self, username: &str, secret: &str) -> Result<Account, OidcError> {
+        let endpoint = self
+            .discovery
+            .document
+            .password_verification_endpoint
+            .as_deref()
+            .ok_or_else(|| OidcError::AuthorizationFailed("Invalid credentials".to_string()))?;
+        let token = self.basic_auth_token.as_deref().ok_or_else(|| {
+            OidcError::Provider(
+                "OIDC password verification endpoint is advertised but \
+                 STALWART_OIDC_BASIC_AUTH_TOKEN is not configured"
+                    .to_string(),
+            )
+        })?;
+        let username = username.trim().to_ascii_lowercase();
+        if username.is_empty() || username.len() > 320 || secret.is_empty() || secret.len() > 1024 {
+            return Err(OidcError::AuthorizationFailed(
+                "Invalid credentials".to_string(),
+            ));
+        }
+
+        let response = self
+            .http
+            .post(endpoint)
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&serde_json::json!({
+                "username": username,
+                "password": secret,
+            }))
+            .map_err(|err| {
+                OidcError::Provider(format!(
+                    "Password verification request serialization failed: {err}"
+                ))
+            })?)
+            .send()
+            .await
+            .map_err(|err| {
+                OidcError::Network(format!("Password verification request failed: {err}"))
+            })?;
+
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            Ok(Account {
+                email: username,
+                email_aliases: Vec::new(),
+                secret: None,
+                groups: None,
+                description: None,
+            })
+        } else if matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+                | reqwest::StatusCode::FORBIDDEN
+                | reqwest::StatusCode::TOO_MANY_REQUESTS
+        ) {
+            Err(OidcError::AuthorizationFailed(
+                "Invalid credentials".to_string(),
+            ))
+        } else {
+            Err(OidcError::Provider(format!(
+                "Password verification endpoint returned HTTP {}",
+                response.status()
+            )))
         }
     }
 

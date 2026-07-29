@@ -1,0 +1,26 @@
+# Namailu AGPL build of Stalwart 0.16.14.
+#
+# Only the PostgreSQL storage backend used by the deployment is enabled. Mail
+# protocols, JMAP, OIDC directories and filtering are regular core features.
+FROM rust:1.97.1-slim-trixie AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential clang cmake libclang-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --locked --release -p stalwart \
+      --no-default-features --features "postgres s3" \
+    && cp /src/target/release/stalwart /tmp/stalwart
+
+FROM stalwartlabs/stalwart:v0.16.14
+LABEL org.opencontainers.image.source="https://git.facilitygo.com/filip/stalwart" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.description="Stalwart 0.16.14 with Namailu unified HUMAN password verification"
+COPY --from=builder --chmod=0755 /tmp/stalwart /usr/local/bin/stalwart

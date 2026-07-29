@@ -9,9 +9,10 @@ use common::{HttpAuthCache, Server, auth::AuthRequest, network::limiter::InFligh
 use directory::Credentials;
 use http_proto::{HttpRequest, HttpSessionData};
 use hyper::header;
+use base64::Engine;
 use mail_parser::decoders::base64::base64_decode;
 use std::future::Future;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub trait Authenticator: Sync + Send {
     fn authenticate_headers(
@@ -91,14 +92,18 @@ impl Authenticator for Server {
                 .await?;
 
             // Cache credentials
+            let max_cache_ttl = Duration::from_secs(self.core.oauth.oauth_expiry_token);
             self.inner.cache.http_auth.insert(
                 token.into(),
                 HttpAuthCache {
                     account_id: access_token.account_id(),
                     revision: access_token.revision(),
                     credential_id: access_token.credential_id(),
+                    // A verified JWT must never outlive its own exp just because
+                    // the HTTP credential cache is configured for longer. The
+                    // unverified peek only shortens an already authenticated token.
                     expires: Instant::now()
-                        + Duration::from_secs(self.core.oauth.oauth_expiry_token),
+                        + auth_cache_ttl(mechanism, token, max_cache_ttl),
                 },
             );
 
@@ -117,6 +122,32 @@ impl Authenticator for Server {
                 .caused_by(trc::location!()))
         }
     }
+}
+
+fn auth_cache_ttl(mechanism: &str, token: &str, max_ttl: Duration) -> Duration {
+    if !mechanism.eq_ignore_ascii_case("bearer") {
+        return max_ttl;
+    }
+
+    let Some(payload) = token.split('.').nth(1).and_then(|payload| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()
+    }) else {
+        // Opaque OAuth tokens and Stalwart API keys keep the configured cache TTL.
+        return max_ttl;
+    };
+    let Some(exp) = serde_json::from_slice::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|claims| claims.get("exp").and_then(|exp| exp.as_u64()))
+    else {
+        return max_ttl;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Duration::from_secs(exp.saturating_sub(now).min(max_ttl.as_secs()))
 }
 
 pub trait HttpHeaders {
@@ -155,4 +186,31 @@ fn decode_plain_auth(token: &str) -> Option<Credentials> {
                     mfa_token: None,
                 })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bearer_cache_never_outlives_jwt_exp() {
+        let exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(format!(r#"{{"exp":{exp}}}"#));
+        let token = format!("header.{payload}.signature");
+        let ttl = auth_cache_ttl("Bearer", &token, Duration::from_secs(900));
+        assert!(ttl <= Duration::from_secs(60));
+        assert!(ttl >= Duration::from_secs(58));
+    }
+
+    #[test]
+    fn opaque_bearer_and_basic_keep_configured_cache_ttl() {
+        let configured = Duration::from_secs(900);
+        assert_eq!(auth_cache_ttl("Bearer", "API_opaque", configured), configured);
+        assert_eq!(auth_cache_ttl("Basic", "opaque", configured), configured);
+    }
 }
