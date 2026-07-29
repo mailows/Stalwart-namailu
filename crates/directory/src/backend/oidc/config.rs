@@ -7,18 +7,13 @@
 use crate::Directory;
 use crate::backend::oidc::lookup::fetch_jwks_keys;
 use crate::backend::oidc::{
-    CachedKey, DiscoveryDocument, JwksCache, OidcConfig, OidcDiscovery, OidcError, OpenIdDirectory,
+    DiscoveryDocument, JwksCache, OidcConfig, OidcDiscovery, OidcError, OpenIdDirectory,
 };
-use ahash::AHashMap;
 use registry::schema::structs;
-use std::sync::Arc;
+use reqwest::redirect::Policy;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use trc::AuthEvent;
-use utils::Client;
-
-const DISCOVERY_RETRY_FOR: Duration = Duration::from_secs(30);
-const DISCOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
 impl OpenIdDirectory {
     pub async fn open(config: structs::OidcDirectory) -> Result<Directory, String> {
@@ -39,47 +34,13 @@ impl OpenIdDirectory {
     pub async fn new(config: OidcConfig) -> Result<Self, OidcError> {
         let http = utils::http::http_client_builder(false)
             .user_agent("Stalwart/1.0")
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(10))
+            // Credentials must never be redirected or inherited by a proxy from the
+            // process environment. The endpoint is a fixed, same-host HTTPS target.
+            .redirect(Policy::none())
+            .no_proxy()
             .build()
             .map_err(|e| OidcError::Network(format!("HTTP client build failed: {e}")))?;
-
-        let started_at = Instant::now();
-        let (document, keys) = loop {
-            match Self::discover(&http, &config).await {
-                Ok(discovery) => break discovery,
-                Err(err) if err.is_transient() && started_at.elapsed() < DISCOVERY_RETRY_FOR => {
-                    trc::event!(
-                        Auth(AuthEvent::Warning),
-                        Url = config.issue_url.to_string(),
-                        Reason = format!(
-                            "{err}, retrying in {} seconds",
-                            DISCOVERY_RETRY_INTERVAL.as_secs()
-                        )
-                    );
-                    tokio::time::sleep(DISCOVERY_RETRY_INTERVAL).await;
-                }
-                Err(err) => return Err(err),
-            }
-        };
-
-        Ok(Self {
-            discovery: OidcDiscovery {
-                url: config.issue_url.clone(),
-                document,
-            },
-            config,
-            http,
-            cache: RwLock::new(JwksCache {
-                keys,
-                last_updated: Instant::now(),
-            }),
-        })
-    }
-
-    async fn discover(
-        http: &Client,
-        config: &OidcConfig,
-    ) -> Result<(DiscoveryDocument, AHashMap<String, Arc<CachedKey>>), OidcError> {
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
             config.issue_url.trim_end_matches('/')
@@ -100,10 +61,29 @@ impl OpenIdDirectory {
         let normalised_issue = config.issue_url.trim_end_matches('/');
         let normalised_issuer = discovery.issuer.trim_end_matches('/');
         if normalised_issuer != normalised_issue {
-            return Err(OidcError::Config(format!(
+            return Err(OidcError::Provider(format!(
                 "Issuer mismatch: discovery document says '{}' but configured issue_url is '{}'",
                 discovery.issuer, config.issue_url,
             )));
+        }
+
+        if let Some(endpoint) = &discovery.password_verification_endpoint {
+            let endpoint_url = reqwest::Url::parse(endpoint).map_err(|err| {
+                OidcError::Provider(format!("Invalid password_verification_endpoint URL: {err}"))
+            })?;
+            let issuer_url = reqwest::Url::parse(&discovery.issuer)
+                .map_err(|err| OidcError::Provider(format!("Invalid issuer URL: {err}")))?;
+            if endpoint_url.scheme() != "https"
+                || endpoint_url.host_str() != issuer_url.host_str()
+                || endpoint_url.username() != ""
+                || endpoint_url.password().is_some()
+            {
+                return Err(OidcError::Provider(
+                    "password_verification_endpoint must be HTTPS, contain no userinfo, \
+                     and use the same hostname as the issuer"
+                        .to_string(),
+                ));
+            }
         }
 
         if let Some(supported) = &discovery.scopes_supported {
@@ -170,8 +150,24 @@ impl OpenIdDirectory {
             });
         }*/
 
-        let keys = fetch_jwks_keys(http, &discovery.jwks_uri).await?;
+        let cache = RwLock::new(JwksCache {
+            keys: fetch_jwks_keys(&http, &discovery.jwks_uri).await?,
+            last_updated: Instant::now(),
+        });
 
-        Ok((discovery, keys))
+        Ok(Self {
+            discovery: OidcDiscovery {
+                url: config.issue_url.clone(),
+                document: discovery,
+            },
+            config,
+            http,
+            cache,
+            // Deployment-specific service identity. It is intentionally not part of
+            // the public registry object or discovery document and is never logged.
+            basic_auth_token: std::env::var("STALWART_OIDC_BASIC_AUTH_TOKEN")
+                .ok()
+                .filter(|token| !token.is_empty()),
+        })
     }
 }
