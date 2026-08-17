@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use std::sync::OnceLock;
+
 use crate::{
     HttpSessionManager,
     api::{ManagementApi, ToManageHttpResponse},
@@ -210,23 +212,23 @@ impl ParseHttp for Server {
                             .await;
                     }
                     ("session", &Method::GET) => {
+                        // Urls in the session document follow the host the client
+                        // used (see `session_base_url`), not the one configured
+                        // public url — brands must not be mixed up.
+                        let base_url = session_base_url(self, &req);
                         return if req.headers().contains_key(header::AUTHORIZATION) {
                             // Authenticate request
                             let (_in_flight, access_token) =
                                 self.authenticate_headers(&req, &session).await?;
 
-                            self.handle_session_resource(
-                                self.core.network.http.url_https.to_string(),
-                                &access_token,
-                            )
-                            .await
-                            .map(|s| s.into_http_response())
+                            self.handle_session_resource(base_url, &access_token)
+                                .await
+                                .map(|s| s.into_http_response())
                         } else {
-                            Ok(Session::new(
-                                &self.core.network.http.url_https,
-                                &self.core.jmap.capabilities,
+                            Ok(
+                                Session::new(&base_url, &self.core.jmap.capabilities)
+                                    .into_http_response(),
                             )
-                            .into_http_response())
                         };
                     }
                     (_, &Method::OPTIONS) => {
@@ -863,4 +865,74 @@ impl SessionManager for HttpSessionManager {
             let _ = self.inner.ipc.push_tx.send(PushEvent::Stop).await;
         }
     }
+}
+
+/// Public hosts (comma separated) that may be echoed back in a JMAP session
+/// document, e.g. `STALWART_PUBLIC_URL_HOSTS=namailu.cz,mailows.com`.
+///
+/// The session resource hands the client ABSOLUTE urls (`apiUrl`, `uploadUrl`,
+/// `downloadUrl`, `eventSourceUrl`, websocket). Upstream builds them from the
+/// single configured public url, so a client that discovered the server on one
+/// brand's hostname is told to continue on another brand's hostname. In a
+/// multi-brand deployment that is both confusing and a hard dependency on a
+/// hostname the customer never typed.
+///
+/// `STALWART_PUBLIC_URL` deliberately keeps serving everything else — OAuth
+/// metadata, its issuer and the web admin links — because those must stay on
+/// one stable host; only the session document follows the request.
+///
+/// Unset or empty keeps the upstream behaviour.
+fn session_public_hosts() -> &'static [String] {
+    static HOSTS: OnceLock<Vec<String>> = OnceLock::new();
+    HOSTS
+        .get_or_init(|| {
+            std::env::var("STALWART_PUBLIC_URL_HOSTS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|host| {
+                    host.trim()
+                        .trim_end_matches('.')
+                        .to_ascii_lowercase()
+                })
+                .filter(|host| !host.is_empty())
+                .collect()
+        })
+        .as_slice()
+}
+
+/// Base url for the session document: the requested host when it is allowlisted,
+/// otherwise the configured public url.
+///
+/// The host is taken from the request, so it is untrusted input — it is used only
+/// when it matches the allowlist exactly. Without that check a spoofed `Host`
+/// header would make us hand the client urls on an attacker's hostname.
+fn session_base_url(server: &Server, req: &HttpRequest) -> String {
+    let allowed = session_public_hosts();
+    if !allowed.is_empty() {
+        if let Some(value) = req
+            .headers()
+            .get("x-forwarded-host")
+            .or_else(|| req.headers().get(header::HOST))
+            .and_then(|value| value.to_str().ok())
+        {
+            // A chain of proxies appends to X-Forwarded-Host; only the first hop
+            // is the host the client actually asked for.
+            let first = value.split(',').next().unwrap_or(value).trim();
+            // Strip the port, but keep IPv6 literals (`[::1]`) intact.
+            let host = match first.rsplit_once(':') {
+                Some((host, port))
+                    if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    host
+                }
+                _ => first,
+            }
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+            if allowed.iter().any(|allowed_host| *allowed_host == host) {
+                return format!("https://{host}");
+            }
+        }
+    }
+    server.core.network.http.url_https.clone()
 }
