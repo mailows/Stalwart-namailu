@@ -1005,7 +1005,7 @@ dependencies = [
  "chrono-tz",
  "hashify",
  "jmap-tools",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "rkyv",
  "serde",
@@ -1294,7 +1294,7 @@ dependencies = [
  "libc",
  "lz4_flex 0.13.1",
  "mail-auth",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "md5",
  "nlp",
@@ -2053,7 +2053,7 @@ dependencies = [
  "futures",
  "jsonwebtoken",
  "ldap3",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "md5",
  "nlp",
@@ -2306,7 +2306,7 @@ dependencies = [
  "directory",
  "groupware",
  "hashify",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "nlp",
  "rand 0.8.7",
@@ -2433,6 +2433,17 @@ name = "fancy-regex"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "476de73bddf2ef8490aa4ee8f1cf40b430bf1d56c48c22080e5186952cd580e6"
 dependencies = [
  "bit-set 0.8.0",
  "regex-automata",
@@ -3210,7 +3221,7 @@ dependencies = [
  "jmap",
  "jmap_proto",
  "mail-auth",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "mime",
  "percent-encoding",
@@ -3862,7 +3873,7 @@ dependencies = [
  "jmap_proto",
  "lz4_flex 0.13.1",
  "mail-auth",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "nlp",
  "p256",
@@ -4390,7 +4401,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hashify",
  "hickory-resolver",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "quick-xml 0.41.0",
  "rand 0.8.7",
@@ -4408,6 +4419,15 @@ name = "mail-builder"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "900998f307338c4013a28ab14d760b784067324b164448c6d98a89e44810473b"
+dependencies = [
+ "gethostname",
+]
+
+[[package]]
+name = "mail-builder"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c942e8a4b83f9351236c1e531ea9fa0237913d63c7fc36818430e0128a1ddf3"
 dependencies = [
  "gethostname",
 ]
@@ -7335,7 +7355,7 @@ dependencies = [
  "groupware",
  "hkdf 0.13.0",
  "jmap_proto",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "memory-stats",
  "p256",
@@ -7511,15 +7531,15 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sieve-rs"
-version = "0.7.2"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4f8e4b2c299c75cffe27efa4d762777d0e616c5741d21627839e80848797cca"
+checksum = "0cc5f9ebe4ba923a82f7524bee0d37a67b829d9befdd32e6840839d14ce6354e"
 dependencies = [
  "ahash",
  "arc-swap",
- "fancy-regex",
+ "fancy-regex 0.19.0",
  "hashify",
- "mail-builder",
+ "mail-builder 0.5.0",
  "mail-parser",
  "rkyv",
  "serde",
@@ -7653,7 +7673,7 @@ dependencies = [
  "hyper-util",
  "lru-cache",
  "mail-auth",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "md5",
  "nlp",
@@ -7747,7 +7767,7 @@ dependencies = [
  "idna",
  "infer 0.19.0",
  "mail-auth",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "nlp",
  "psl",
@@ -8179,7 +8199,7 @@ dependencies = [
  "jmap-tools",
  "jmap_proto",
  "mail-auth",
- "mail-builder",
+ "mail-builder 0.4.4",
  "mail-parser",
  "managesieve",
  "migration",
@@ -10399,7 +10419,7 @@ checksum = "f9eaee90f4a795d1eb4ba6c51e1c1721d4784d550e8efa7b2600f29c867365e0"
 dependencies = [
  "chrono",
  "derive_builder",
- "fancy-regex",
+ "fancy-regex 0.18.0",
  "itertools 0.14.0",
  "lazy_static",
  "regex",
