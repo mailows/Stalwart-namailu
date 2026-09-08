@@ -1,6 +1,6 @@
-# Namailu fork of Stalwart 0.16.14
+# Namailu fork of Stalwart 0.16.21
 
-Two changes on top of upstream `v0.16.14`; everything else is untouched.
+Two changes on top of upstream `v0.16.21`; everything else is untouched.
 
 | area | change |
 |---|---|
