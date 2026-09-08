@@ -48,7 +48,7 @@ backends used by Namailu. Build it with:
 
 ```sh
 docker build -f Dockerfile.namailu \
-  -t namailu/stalwart:v0.16.14-unified-password .
+  -t namailu/stalwart:v0.16.21-unified-password .
 ```
 
 The fork remains licensed under the upstream AGPL-3.0-only option. The complete
