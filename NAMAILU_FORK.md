@@ -1,11 +1,33 @@
 # Namailu fork of Stalwart 0.16.21
 
-Two changes on top of upstream `v0.16.21`; everything else is untouched.
+Three changes on top of upstream `v0.16.21`; everything else is untouched.
 
 | area | change |
 |---|---|
 | `crates/directory/src/backend/oidc/*`, `crates/http/src/auth/authenticate.rs` | unified HUMAN password: Basic credentials are verified against the identity provider (below) |
 | `crates/http/src/request.rs` | the JMAP session document builds its URLs from the requested host (below) |
+| `crates/directory/src/backend/oidc/*`, `crates/directory/src/core/dispatch.rs` and its two callers | OIDC discovery is fetched lazily and retried; a provider that is down at boot no longer leaves the directory dead (below) |
+
+## Lazy OIDC discovery
+
+Upstream fetches the OIDC discovery document and JWKS once, inside
+`OpenIdDirectory::open`, and fails the directory when the provider is not
+reachable. The server then starts without that directory and every
+authentication for its domains fails until a restart — which is exactly what
+happens when the mail server boots before the identity provider on the same
+host.
+
+The fork keeps the directory alive: the discovery document is fetched on first
+use (`OpenIdDirectory::discovery`), the startup fetch is only an eager attempt
+that logs a warning on failure, concurrent callers share one fetch, and a
+failed attempt is not repeated for two seconds so an outage of the provider
+does not turn every login into a discovery round-trip. Validation of the
+document (issuer match, HTTPS password-verification endpoint on the issuer
+host, scope and claim warnings) is unchanged, only moved. The two upstream
+places that read the document synchronously (`get_pacc_for_domain` and the
+per-domain OAuth metadata) now await it and fall back to the server's own
+metadata when it is unavailable, as they already did for domains without an
+OIDC directory.
 
 ## Unified HUMAN password
 

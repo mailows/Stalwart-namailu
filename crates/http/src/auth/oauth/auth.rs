@@ -150,13 +150,14 @@ impl OAuthApiHandler for Server {
             .recovery_admin()
             .is_some_and(|(user, _)| user.trim().eq_ignore_ascii_case(auth_as.address()));
 
+        let mut endpoint = None;
         if !is_recovery_admin
             && let Some(domain_name) = auth_as.domain().filter(|domain| !domain.is_empty())
-            && let Some(endpoint) = self
-                .get_directory_for_domain(domain_name)
-                .await?
-                .and_then(|directory| directory.oidc_discovery_document())
+            && let Some(directory) = self.get_directory_for_domain(domain_name).await?
         {
+            endpoint = directory.oidc_discovery_document().await;
+        }
+        if let Some(endpoint) = endpoint {
             Ok(JsonResponse::new(&endpoint.document)
                 .no_cache()
                 .into_http_response())

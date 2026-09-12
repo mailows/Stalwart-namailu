@@ -382,24 +382,23 @@ impl Server {
     }
 
     pub async fn get_pacc_for_domain(&self, domain_name: &str) -> trc::Result<String> {
-        self.get_directory_for_domain(domain_name)
+        let directory = self
+            .get_directory_for_domain(domain_name)
             .await
-            .caused_by(trc::location!())
-            .map(|directory| {
-                directory
-                    .and_then(|directory| {
-                        directory
-                            .oidc_discovery_document()
-                            .map(|doc| self.core.network.info.pacc.build(&doc.url))
-                    })
-                    .unwrap_or_else(|| {
-                        self.core
-                            .network
-                            .info
-                            .pacc
-                            .build(&self.core.network.http.url_https)
-                    })
-            })
+            .caused_by(trc::location!())?;
+        let mut discovery = None;
+        if let Some(directory) = directory {
+            discovery = directory.oidc_discovery_document().await;
+        }
+        Ok(match discovery {
+            Some(doc) => self.core.network.info.pacc.build(&doc.url),
+            None => self
+                .core
+                .network
+                .info
+                .pacc
+                .build(&self.core.network.http.url_https),
+        })
     }
 }
 

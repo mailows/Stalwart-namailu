@@ -6,6 +6,7 @@
 
 use crate::{Account, Credentials, Directory, Recipient, backend::oidc::OidcDiscovery};
 use registry::schema::enums::DirectoryType;
+use std::sync::Arc;
 use trc::AddContext;
 
 impl Directory {
@@ -45,9 +46,11 @@ impl Directory {
         }
     }
 
-    pub fn oidc_discovery_document(&self) -> Option<&OidcDiscovery> {
+    /// Discovery is fetched lazily; `None` also when the provider is currently
+    /// unreachable (the directory logs the reason and retries on the next call).
+    pub async fn oidc_discovery_document(&self) -> Option<Arc<OidcDiscovery>> {
         match &self {
-            Directory::OpenId(directory) => Some(&directory.discovery),
+            Directory::OpenId(directory) => directory.discovery().await.ok(),
             _ => None,
         }
     }
