@@ -8,7 +8,7 @@ use ahash::AHashMap;
 use jsonwebtoken::{Algorithm, DecodingKey};
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use utils::Client;
 
 pub mod config;
@@ -24,12 +24,13 @@ pub struct OidcConfig {
     pub default_domain: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct OidcDiscovery {
     pub url: String,
     pub document: DiscoveryDocument,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct DiscoveryDocument {
     pub issuer: String,
     pub jwks_uri: String,
@@ -61,9 +62,22 @@ struct JwksCache {
     last_updated: Instant,
 }
 
+/// Result of the last failed discovery attempt, kept so that a provider that is
+/// down does not get hammered by every login: retries are spaced out.
+struct DiscoveryFailure {
+    at: Instant,
+    reason: String,
+}
+
 pub struct OpenIdDirectory {
     config: OidcConfig,
-    pub discovery: OidcDiscovery,
+    /// Discovery document and the JWKS it points to are fetched lazily. The
+    /// provider may not be reachable yet when the server starts (it is often
+    /// another service of the same deployment); a directory that failed once at
+    /// boot must not stay dead until a restart. `None` until the first successful
+    /// fetch; every caller goes through `OpenIdDirectory::discovery`.
+    discovery: RwLock<Option<Arc<OidcDiscovery>>>,
+    discovery_lock: Mutex<Option<DiscoveryFailure>>,
     http: Client,
     cache: RwLock<JwksCache>,
     basic_auth_token: Option<String>,

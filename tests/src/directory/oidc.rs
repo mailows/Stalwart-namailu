@@ -51,7 +51,7 @@ pub async fn test() {
 
     // Make sure the userinfo endpoint is not being used
     if let Directory::OpenId(directory) = &mut oidc {
-        directory.discovery.document.userinfo_endpoint = "http://invalid".to_string();
+        directory.set_userinfo_endpoint("http://invalid").await;
     }
 
     // JWT authentication should still work without the userinfo endpoint
@@ -89,7 +89,7 @@ pub async fn test() {
         .await
         .unwrap();
     if let Directory::OpenId(directory) = &mut oidc_broken_userinfo {
-        directory.discovery.document.userinfo_endpoint = "http://invalid".to_string();
+        directory.set_userinfo_endpoint("http://invalid").await;
     }
     assert!(
         oidc_broken_userinfo

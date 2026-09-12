@@ -59,8 +59,8 @@ impl OpenIdDirectory {
     /// profile, hash or session is returned. App passwords are still handled earlier
     /// in `Server::route_auth_request` and never reach this endpoint.
     async fn authenticate_basic(&self, username: &str, secret: &str) -> Result<Account, OidcError> {
-        let endpoint = self
-            .discovery
+        let discovery = self.discovery().await?;
+        let endpoint = discovery
             .document
             .password_verification_endpoint
             .as_deref()
@@ -134,6 +134,7 @@ impl OpenIdDirectory {
             ));
         }
 
+        let discovery = self.discovery().await?;
         let candidates = self.get_key(header.kid.as_deref()).await?;
         let mut last_err = None;
         for cached in &candidates {
@@ -147,7 +148,7 @@ impl OpenIdDirectory {
                 validation.validate_aud = false;
             }
 
-            validation.set_issuer(&[&self.discovery.document.issuer]);
+            validation.set_issuer(&[&discovery.document.issuer]);
             validation.leeway = 60;
 
             match decode::<serde_json::Value>(token, dk, &validation) {
@@ -228,7 +229,8 @@ impl OpenIdDirectory {
             }
         }
 
-        let new_keys = fetch_jwks_keys(&self.http, &self.discovery.document.jwks_uri).await?;
+        let jwks_uri = self.discovery().await?.document.jwks_uri.clone();
+        let new_keys = fetch_jwks_keys(&self.http, &jwks_uri).await?;
         {
             let mut guard = self.cache.write().await;
             guard.keys = new_keys;
@@ -257,9 +259,10 @@ impl OpenIdDirectory {
     }
 
     async fn fetch_userinfo(&self, token: &str) -> Result<serde_json::Value, OidcError> {
+        let userinfo_endpoint = self.discovery().await?.document.userinfo_endpoint.clone();
         let resp = self
             .http
-            .get(&self.discovery.document.userinfo_endpoint)
+            .get(&userinfo_endpoint)
             .bearer_auth(token)
             .send()
             .await
