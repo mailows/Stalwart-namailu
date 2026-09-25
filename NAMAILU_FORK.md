@@ -1,6 +1,6 @@
-# Namailu fork of Stalwart 0.16.21
+# Namailu fork of Stalwart 0.16.23
 
-Three changes on top of upstream `v0.16.21`; everything else is untouched.
+Three changes on top of upstream `v0.16.23`; everything else is untouched.
 
 | area | change |
 |---|---|
@@ -70,10 +70,21 @@ backends used by Namailu. Build it with:
 
 ```sh
 docker build -f Dockerfile.namailu \
-  -t namailu/stalwart:v0.16.21-unified-password .
+  -t namailu/stalwart:v0.16.23-unified-password .
 ```
 
 The fork remains licensed under the upstream AGPL-3.0-only option. The complete
 corresponding source of the running modified version is published at
 <https://git.facilitygo.com/filip/Stalwart>, branch `namailu-unified-password`,
 which is publicly readable.
+
+## Rebase onto v0.16.23 (25 Sep 2026)
+
+- `oidc/config.rs`: upstream v0.16.22 added a 30 s discovery retry at boot and marks a
+  failed directory as `Directory::Unavailable` for the rest of the process lifetime. The
+  fork keeps its lazy discovery instead (the provider may be down for longer than 30 s
+  when the whole host boots), so our version of this file replaces upstream's. Upstream's
+  `OidcError::Config` / `is_transient` stay in `mod.rs`, unused by the fork.
+- `core/dispatch.rs`: both imports kept (upstream `DirectoryType`, fork `Arc`).
+- v0.16.23 serialises the DNSSEC resolver to one nameserver at a time (hickory TCP-retry
+  race). Checked before adding any fork-side fallback for "DNSSEC validation failed".
