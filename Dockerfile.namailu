@@ -1,4 +1,4 @@
-# Namailu AGPL build of Stalwart 0.16.21.
+# Namailu AGPL build of Stalwart 0.16.23.
 #
 # Only the PostgreSQL storage backend used by the deployment is enabled. Mail
 # protocols, JMAP, OIDC directories and filtering are regular core features.
@@ -19,8 +19,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       --no-default-features --features "postgres s3" \
     && cp /src/target/release/stalwart /tmp/stalwart
 
-FROM stalwartlabs/stalwart:v0.16.21
+FROM stalwartlabs/stalwart:v0.16.23
 LABEL org.opencontainers.image.source="https://git.facilitygo.com/filip/Stalwart" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
-      org.opencontainers.image.description="Stalwart 0.16.21 with Namailu unified HUMAN password verification"
+      org.opencontainers.image.description="Stalwart 0.16.23 with Namailu unified HUMAN password verification"
 COPY --from=builder --chmod=0755 /tmp/stalwart /usr/local/bin/stalwart
