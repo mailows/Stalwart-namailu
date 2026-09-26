@@ -1,12 +1,30 @@
 # Namailu fork of Stalwart 0.16.23
 
-Three changes on top of upstream `v0.16.23`; everything else is untouched.
+Four changes on top of upstream `v0.16.23`; everything else is untouched.
 
 | area | change |
 |---|---|
 | `crates/directory/src/backend/oidc/*`, `crates/http/src/auth/authenticate.rs` | unified HUMAN password: Basic credentials are verified against the identity provider (below) |
 | `crates/http/src/request.rs` | the JMAP session document builds its URLs from the requested host (below) |
 | `crates/directory/src/backend/oidc/*`, `crates/directory/src/core/dispatch.rs` and its two callers | OIDC discovery is fetched lazily and retried; a provider that is down at boot no longer leaves the directory dead (below) |
+| `crates/email/src/sieve/outbound_hook.rs`, `crates/email/src/sieve/ingest.rs` | mail sent by a user Sieve script (redirect, vacation, notify) asks the RCPT-stage MTA hook first (below) |
+
+## Outgoing Sieve mail asks the MTA hook
+
+Upstream queues the messages a user Sieve script sends (`redirect`, `vacation`,
+`notify`) directly, without an SMTP session, so no MTA hook, milter or rate limit
+sees them. A deployment that enforces per-account sending limits in its RCPT hook
+is then bypassed by a one-line filter or by the account's forwarding, and the mail
+still leaves from the deployment's IP.
+
+The fork sends each recipient of such a message to the first MTA hook that runs on
+the RCPT stage, as a request shaped like an RCPT call: `context.stage = "rcpt"`,
+`context.sasl.login` = the account, envelope from the account to the recipient, plus
+`context.sieve` = `"redirect"` (the received message) or `"message"` (created by the
+script). Only `"action": "accept"` lets the copy out. Errors, timeouts (capped at
+10 s) and rejections drop it; the received message itself is never lost, because
+the existing fail-safe files it into the inbox when no other action kept it.
+Without an RCPT hook configured, behaviour is unchanged.
 
 ## Lazy OIDC discovery
 
