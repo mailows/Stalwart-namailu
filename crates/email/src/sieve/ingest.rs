@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{ActiveScript, SeenIdHash, SieveScript};
+use super::{ActiveScript, SeenIdHash, SieveScript, outbound_hook::sieve_outbound_allowed};
 use crate::{
     cache::{MessageCacheFetch, mailbox::MailboxCacheAccess},
     mailbox::{INBOX_ID, TRASH_ID, manage::MailboxFnc},
@@ -413,6 +413,29 @@ impl SieveScriptIngest for Server {
                                     continue;
                                 }
                             };
+
+                            // Fork: every outgoing Sieve message asks the RCPT MTA hook
+                            // (see `outbound_hook`). Message 0 is the received message,
+                            // so a send of it is a redirect; anything else was created
+                            // by the script (vacation, notify).
+                            let mut allowed = Vec::with_capacity(recipients.len());
+                            for rcpt in recipients {
+                                if sieve_outbound_allowed(
+                                    self,
+                                    &mail_from,
+                                    &rcpt,
+                                    message_id == 0,
+                                    session_id,
+                                )
+                                .await
+                                {
+                                    allowed.push(rcpt);
+                                }
+                            }
+                            let recipients = allowed;
+                            if recipients.is_empty() {
+                                continue;
+                            }
 
                             if message.raw_message.len() <= self.core.email.mail_max_size {
                                 trc::event!(

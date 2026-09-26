@@ -30,6 +30,7 @@ rand = "0.8"
 sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
 hashify = "0.2"
 rkyv = { version = "0.8.18", features = ["little_endian"] }
+serde_json = "1.0"
 
 [features]
 test_mode = []
