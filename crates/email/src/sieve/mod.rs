@@ -13,6 +13,7 @@ use types::blob_hash::BlobHash;
 pub mod delete;
 pub mod index;
 pub mod ingest;
+pub mod outbound_hook;
 
 #[derive(Debug, Clone)]
 pub struct ActiveScript {
