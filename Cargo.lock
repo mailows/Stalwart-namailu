@@ -2398,6 +2398,7 @@ dependencies = [
  "rkyv",
  "rsa",
  "sequoia-openpgp",
+ "serde_json",
  "sieve-rs",
  "store",
  "tokio",
