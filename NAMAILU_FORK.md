@@ -107,7 +107,8 @@ docker build -f Dockerfile.namailu \
 The fork remains licensed under the upstream AGPL-3.0-only option. The complete
 corresponding source of the running modified version is published at
 <https://git.facilitygo.com/filip/Stalwart>, branch `namailu-unified-password`,
-which is publicly readable.
+which must be publicly readable. **As of 27 Sep 2026 it is not** — anonymous access
+returns 404; making the repository (or a public mirror) readable is an open item.
 
 ## Rebase onto v0.16.23 (25 Sep 2026)
 
