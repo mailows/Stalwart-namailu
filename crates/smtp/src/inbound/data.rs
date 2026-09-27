@@ -523,6 +523,7 @@ impl<T: SessionStream> Session<T> {
         let mut train_spam = None;
         let mut spam_result = None;
         self.data.spam_score = None;
+        self.data.spam_tags = None;
         if self.server.core.spam.enabled
             && self
                 .server
@@ -601,7 +602,7 @@ impl<T: SessionStream> Session<T> {
                 .await
                 .unwrap_or(true)
         {
-            self.data.spam_score = self
+            if let Some((score, tags)) = self
                 .spam_score_outgoing(
                     &parsed_message,
                     &dkim_output,
@@ -610,7 +611,11 @@ impl<T: SessionStream> Session<T> {
                     dmarc_result.as_ref(),
                     dmarc_policy.as_ref(),
                 )
-                .await;
+                .await
+            {
+                self.data.spam_score = Some(score);
+                self.data.spam_tags = Some(tags);
+            }
         }
 
         // Run Milter filters
