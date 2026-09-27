@@ -241,7 +241,12 @@ impl<T: SessionStream> Session<T> {
                         )
                     })
                     .collect(),
-                server_headers: vec![],
+                // Fork: the spam filter's score for this message (see `SessionData`).
+                server_headers: self
+                    .data
+                    .spam_score
+                    .map(|score| vec![("X-Spam-Score".to_string(), format!("{score:.2}"))])
+                    .unwrap_or_default(),
                 contents: String::from_utf8_lossy(message.raw_body()).into_owned(),
                 size: message.raw_message().len(),
             }),
