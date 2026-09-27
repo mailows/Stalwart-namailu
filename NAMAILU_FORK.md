@@ -30,7 +30,10 @@ Without an RCPT hook configured, behaviour is unchanged.
 ## Spam score for the MTA hook
 
 Upstream sends `serverHeaders` empty, so a DATA-stage hook cannot see the spam
-verdict. The fork keeps the score of the message being processed in `SessionData`
+verdict — and it does not classify authenticated sessions at all, so outgoing mail
+is never scored. The fork scores authenticated mail in a score-only pass
+(`spam_score_outgoing`: no headers added, nothing trained, local recipients' spam
+flags untouched). The fork keeps the score of the message being processed in `SessionData`
 (reset for every message) and sends it as `["X-Spam-Score", "<score>"]`. A deployment
 can then apply its own policy — Namailu rejects authenticated (outgoing) mail from the
 spam threshold instead of the global reject score, which otherwise only tags such mail
