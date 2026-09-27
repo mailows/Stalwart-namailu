@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp /src/target/release/stalwart /tmp/stalwart
 
 FROM stalwartlabs/stalwart:v0.16.23
-LABEL org.opencontainers.image.source="https://git.facilitygo.com/filip/Stalwart" \
+LABEL org.opencontainers.image.source="https://github.com/mailows/Stalwart-namailu" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
       org.opencontainers.image.description="Stalwart 0.16.23 with Namailu unified HUMAN password verification"
 COPY --from=builder --chmod=0755 /tmp/stalwart /usr/local/bin/stalwart
