@@ -1,6 +1,6 @@
 # Namailu fork of Stalwart 0.16.23
 
-Four changes on top of upstream `v0.16.23`; everything else is untouched.
+Five changes on top of upstream `v0.16.23`; everything else is untouched.
 
 | area | change |
 |---|---|
@@ -8,6 +8,7 @@ Four changes on top of upstream `v0.16.23`; everything else is untouched.
 | `crates/http/src/request.rs` | the JMAP session document builds its URLs from the requested host (below) |
 | `crates/directory/src/backend/oidc/*`, `crates/directory/src/core/dispatch.rs` and its two callers | OIDC discovery is fetched lazily and retried; a provider that is down at boot no longer leaves the directory dead (below) |
 | `crates/email/src/sieve/outbound_hook.rs`, `crates/email/src/sieve/ingest.rs` | mail sent by a user Sieve script (redirect, vacation, notify) asks the RCPT-stage MTA hook first (below) |
+| `crates/smtp/src/core/mod.rs`, `crates/smtp/src/inbound/{data,session}.rs`, `crates/smtp/src/inbound/hooks/message.rs` | the DATA-stage MTA hook receives the spam filter score as `serverHeaders` `X-Spam-Score` (below) |
 
 ## Outgoing Sieve mail asks the MTA hook
 
@@ -25,6 +26,15 @@ script). Only `"action": "accept"` lets the copy out. Errors, timeouts (capped a
 10 s) and rejections drop it; the received message itself is never lost, because
 the existing fail-safe files it into the inbox when no other action kept it.
 Without an RCPT hook configured, behaviour is unchanged.
+
+## Spam score for the MTA hook
+
+Upstream sends `serverHeaders` empty, so a DATA-stage hook cannot see the spam
+verdict. The fork keeps the score of the message being processed in `SessionData`
+(reset for every message) and sends it as `["X-Spam-Score", "<score>"]`. A deployment
+can then apply its own policy — Namailu rejects authenticated (outgoing) mail from the
+spam threshold instead of the global reject score, which otherwise only tags such mail
+and lets it out. No score (filter disabled or not run) = no header.
 
 ## Lazy OIDC discovery
 
