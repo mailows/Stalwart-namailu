@@ -522,6 +522,7 @@ impl<T: SessionStream> Session<T> {
         // Run SPAM filter
         let mut train_spam = None;
         let mut spam_result = None;
+        self.data.spam_score = None;
         if self.server.core.spam.enabled
             && self
                 .server
@@ -551,6 +552,7 @@ impl<T: SessionStream> Session<T> {
                     });
                     let scores = &self.server.core.spam.scores;
                     spam_result = Some((score.score, scores.spam_percentage(score.score)));
+                    self.data.spam_score = Some(score.score);
 
                     // Add scores for local recipients
                     for (user_score, recipient) in

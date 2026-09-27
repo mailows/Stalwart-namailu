@@ -92,6 +92,10 @@ pub struct SessionData {
     pub spf_ehlo: Option<SpfOutput>,
     pub spf_mail_from: Option<SpfOutput>,
     pub dnsbl_error: Option<Vec<u8>>,
+    /// Fork: spam filter score of the message being processed, passed to the DATA-stage
+    /// MTA hook (`serverHeaders`, `X-Spam-Score`) so it can apply its own policy, e.g. a
+    /// lower threshold for authenticated (outgoing) mail.
+    pub spam_score: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +172,7 @@ impl SessionData {
             spf_ehlo: None,
             spf_mail_from: None,
             dnsbl_error: None,
+            spam_score: None,
         }
     }
 }
@@ -291,6 +296,7 @@ impl SessionData {
             spf_ehlo: None,
             spf_mail_from: None,
             dnsbl_error: None,
+            spam_score: None,
         }
     }
 }
