@@ -45,6 +45,46 @@ impl<T: SessionStream> Session<T> {
         }
     }
 
+    /// Fork: score an authenticated (outgoing) message without acting on it.
+    ///
+    /// Upstream does not classify authenticated sessions at all (`spam_classify` above
+    /// returns `Disabled`), so an account sending spam from its own mailbox is never
+    /// scored. The score is only handed to the DATA-stage MTA hook (`serverHeaders`
+    /// `X-Spam-Score`); no headers are added, nothing is trained and local recipients'
+    /// spam flags are untouched — the hook decides. Reject/discard thresholds map to
+    /// the threshold itself (the exact score is not returned in that case).
+    pub async fn spam_score_outgoing<'x>(
+        &'x self,
+        message: &'x Message<'x>,
+        dkim_result: &'x [DkimOutput<'x>],
+        dkim2_result: Option<&'x Dkim2Output<'x>>,
+        arc_result: Option<&'x ArcOutput<'x>>,
+        dmarc_result: Option<&'x DmarcResult>,
+        dmarc_policy: Option<&'x Policy>,
+    ) -> Option<f32> {
+        let server = &self.server;
+        let mut ctx = server.spam_filter_init(self.build_spam_input(
+            message,
+            dkim_result,
+            dkim2_result,
+            arc_result,
+            dmarc_result,
+            dmarc_policy,
+        ));
+        let scores = &server.core.spam.scores;
+        match server.spam_filter_classify(&mut ctx).await {
+            SpamFilterAction::Allow(score) => Some(score.score),
+            SpamFilterAction::Reject => Some(scores.reject_threshold.max(scores.spam_threshold)),
+            SpamFilterAction::Discard => Some(
+                scores
+                    .discard_threshold
+                    .max(scores.reject_threshold)
+                    .max(scores.spam_threshold),
+            ),
+            SpamFilterAction::Disabled => None,
+        }
+    }
+
     pub fn build_spam_input<'x>(
         &'x self,
         message: &'x Message<'x>,

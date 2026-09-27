@@ -591,6 +591,28 @@ impl<T: SessionStream> Session<T> {
             }
         }
 
+        // Fork: authenticated sessions are not classified above; score them for the
+        // MTA hook only (see `spam_score_outgoing`).
+        if self.is_authenticated()
+            && self.server.core.spam.enabled
+            && self
+                .server
+                .eval_if(&dc.spam_filter, self, self.data.session_id)
+                .await
+                .unwrap_or(true)
+        {
+            self.data.spam_score = self
+                .spam_score_outgoing(
+                    &parsed_message,
+                    &dkim_output,
+                    dkim2_output.as_ref(),
+                    (&arc_output).into(),
+                    dmarc_result.as_ref(),
+                    dmarc_policy.as_ref(),
+                )
+                .await;
+        }
+
         // Run Milter filters
         let mut modifications = Vec::new();
         match self
