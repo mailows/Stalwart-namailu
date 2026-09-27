@@ -96,6 +96,8 @@ pub struct SessionData {
     /// MTA hook (`serverHeaders`, `X-Spam-Score`) so it can apply its own policy, e.g. a
     /// lower threshold for authenticated (outgoing) mail.
     pub spam_score: Option<f32>,
+    /// Fork: tags behind `spam_score` for authenticated mail (see `spam_score_outgoing`).
+    pub spam_tags: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -173,6 +175,7 @@ impl SessionData {
             spf_mail_from: None,
             dnsbl_error: None,
             spam_score: None,
+            spam_tags: None,
         }
     }
 }
@@ -297,6 +300,7 @@ impl SessionData {
             spf_mail_from: None,
             dnsbl_error: None,
             spam_score: None,
+            spam_tags: None,
         }
     }
 }
