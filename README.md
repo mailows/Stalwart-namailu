@@ -5,7 +5,7 @@
 </p>
 
 <h3 align="center">
-  Secure, scalable mail & collaboration server with comprehensive protocol support 🛡️ <br/>(IMAP, JMAP, SMTP, CalDAV, CardDAV, WebDAV)
+  Secure, scalable mail & collaboration server with comprehensive protocol support 🛡️ <br/>(IMAP, JMAP, SMTP, CalDAV, CardDAV, WebDAV) edited by <a href="https://www.namailu.cz">naMailu.cz</a> && <a href="https://www.mailows.com">mailows.com</a>
 </h3>
 
 <br>
