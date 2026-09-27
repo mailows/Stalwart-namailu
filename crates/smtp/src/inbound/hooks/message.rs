@@ -245,7 +245,14 @@ impl<T: SessionStream> Session<T> {
                 server_headers: self
                     .data
                     .spam_score
-                    .map(|score| vec![("X-Spam-Score".to_string(), format!("{score:.2}"))])
+                    .map(|score| {
+                        let mut headers =
+                            vec![("X-Spam-Score".to_string(), format!("{score:.2}"))];
+                        if let Some(tags) = &self.data.spam_tags {
+                            headers.push(("X-Spam-Tags".to_string(), tags.clone()));
+                        }
+                        headers
+                    })
                     .unwrap_or_default(),
                 contents: String::from_utf8_lossy(message.raw_body()).into_owned(),
                 size: message.raw_message().len(),

@@ -49,10 +49,14 @@ impl<T: SessionStream> Session<T> {
     ///
     /// Upstream does not classify authenticated sessions at all (`spam_classify` above
     /// returns `Disabled`), so an account sending spam from its own mailbox is never
-    /// scored. The score is only handed to the DATA-stage MTA hook (`serverHeaders`
-    /// `X-Spam-Score`); no headers are added, nothing is trained and local recipients'
-    /// spam flags are untouched — the hook decides. Reject/discard thresholds map to
-    /// the threshold itself (the exact score is not returned in that case).
+    /// scored. The result only goes to the DATA-stage MTA hook (`serverHeaders`
+    /// `X-Spam-Score`, `X-Spam-Tags`); no headers are added, nothing is trained and
+    /// local recipients' spam flags are untouched — the hook decides.
+    ///
+    /// The score counts CONTENT tags only. Tags about the sending infrastructure (IP,
+    /// rDNS, EHLO, Received, SPF/DKIM/DMARC/ARC, IP blocklists) describe the operator's
+    /// own server for authenticated mail and gave an ordinary message 8.1 points in
+    /// testing; they are listed in `X-Spam-Tags` but not added up.
     pub async fn spam_score_outgoing<'x>(
         &'x self,
         message: &'x Message<'x>,
@@ -61,7 +65,7 @@ impl<T: SessionStream> Session<T> {
         arc_result: Option<&'x ArcOutput<'x>>,
         dmarc_result: Option<&'x DmarcResult>,
         dmarc_policy: Option<&'x Policy>,
-    ) -> Option<f32> {
+    ) -> Option<(f32, String)> {
         let server = &self.server;
         let mut ctx = server.spam_filter_init(self.build_spam_input(
             message,
@@ -71,18 +75,44 @@ impl<T: SessionStream> Session<T> {
             dmarc_result,
             dmarc_policy,
         ));
-        let scores = &server.core.spam.scores;
-        match server.spam_filter_classify(&mut ctx).await {
-            SpamFilterAction::Allow(score) => Some(score.score),
-            SpamFilterAction::Reject => Some(scores.reject_threshold.max(scores.spam_threshold)),
-            SpamFilterAction::Discard => Some(
-                scores
-                    .discard_threshold
-                    .max(scores.reject_threshold)
-                    .max(scores.spam_threshold),
-            ),
-            SpamFilterAction::Disabled => None,
+        if matches!(
+            server.spam_filter_classify(&mut ctx).await,
+            SpamFilterAction::Disabled
+        ) {
+            return None;
         }
+        let strong = server
+            .core
+            .spam
+            .scores
+            .reject_threshold
+            .max(server.core.spam.scores.spam_threshold);
+        let mut total = 0.0f32;
+        let mut listed: Vec<(&str, f32, bool)> = Vec::new();
+        for tag in &ctx.result.tags {
+            let score = match server.core.spam.lists.scores.get(tag) {
+                Some(SpamFilterAction::Allow(score)) => *score,
+                Some(SpamFilterAction::Reject) | Some(SpamFilterAction::Discard) => strong,
+                None | Some(SpamFilterAction::Disabled) => 0.0,
+            };
+            if score == 0.0 {
+                continue;
+            }
+            let infra = is_infrastructure_tag(tag);
+            if !infra {
+                total += score;
+            }
+            listed.push((tag.as_str(), score, infra));
+        }
+        listed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut tags = String::new();
+        for (tag, score, infra) in listed.into_iter().take(40) {
+            if !tags.is_empty() {
+                tags.push(' ');
+            }
+            tags.push_str(&format!("{tag}({score:.1}){}", if infra { "*" } else { "" }));
+        }
+        Some((total, tags))
     }
 
     pub fn build_spam_input<'x>(
@@ -134,4 +164,15 @@ impl<T: SessionStream> Session<T> {
             is_train: false,
         }
     }
+}
+
+/// Tags describing the sending infrastructure rather than the message. For
+/// authenticated mail that infrastructure is the operator's own server.
+fn is_infrastructure_tag(tag: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "SPF_", "R_SPF", "DKIM", "R_DKIM", "DMARC_", "ARC_", "RBL_", "RWL_", "DNSWL_",
+        "RDNS_", "HELO_", "RCVD_", "IP_", "ASN", "AUTH_", "VIOLATED_DIRECT_SPF",
+        "FORGED_RCVD_TRAIL", "PREVIOUSLY_DELIVERED", "MAILSPIKE", "SENDERSCORE",
+    ];
+    PREFIXES.iter().any(|p| tag.starts_with(p))
 }
