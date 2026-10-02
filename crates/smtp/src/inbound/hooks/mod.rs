@@ -25,6 +25,9 @@ pub struct Context {
     /// Server-created SPF evidence for the exact non-null MAIL FROM; never a header.
     #[serde(rename = "verifiedEnvelopeSender", skip_serializing_if = "Option::is_none", default)]
     pub verified_envelope_sender: Option<String>,
+    /// Server-verified DKIM identity: the single header From with an aligned pass.
+    #[serde(rename = "dkimVerifiedFrom", skip_serializing_if = "Option::is_none", default)]
+    pub dkim_verified_from: Option<String>,
     pub stage: Stage,
     pub client: Client,
     #[serde(skip_serializing_if = "Option::is_none")]

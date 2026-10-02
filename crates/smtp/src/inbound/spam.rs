@@ -74,7 +74,7 @@ impl<T: SessionStream> Session<T> {
             arc_result,
             dmarc_result,
             dmarc_policy,
-        )).await
+        ), &[]).await
     }
 
     pub fn build_spam_input<'x>(
