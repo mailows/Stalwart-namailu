@@ -14,6 +14,7 @@ pub mod delete;
 pub mod index;
 pub mod ingest;
 pub mod outbound_hook;
+pub mod outgoing_spam;
 
 #[derive(Debug, Clone)]
 pub struct ActiveScript {

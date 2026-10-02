@@ -26,6 +26,51 @@ use mail_auth::AuthenticatedMessage;
 use std::time::Instant;
 use trc::MtaHookEvent;
 
+/// Attest only the non-null envelope actually evaluated by MAIL FROM SPF.
+/// A later trusted filter rewrite cannot relabel an earlier passing result.
+fn verified_envelope_sender(
+    stage: Stage,
+    spf_result: Option<mail_auth::SpfResult>,
+    checked_sender: Option<&str>,
+    current_sender: Option<&str>,
+) -> Option<String> {
+    let current_sender = current_sender?;
+    (stage == Stage::Data
+        && spf_result == Some(mail_auth::SpfResult::Pass)
+        && !current_sender.is_empty()
+        && checked_sender == Some(current_sender))
+        .then(|| current_sender.to_owned())
+}
+
+#[cfg(test)]
+mod sender_proof_tests {
+    use super::{Stage, verified_envelope_sender};
+    use mail_auth::SpfResult;
+
+    #[test]
+    fn data_requires_passing_spf_bound_to_exact_original_identity() {
+        let sender = "partner@example.test";
+        assert_eq!(verified_envelope_sender(Stage::Data, Some(SpfResult::Pass),
+            Some(sender), Some(sender)), Some(sender.to_owned()));
+
+        for (stage, result, checked, current) in [
+            (Stage::Rcpt, Some(SpfResult::Pass), Some(sender), Some(sender)),
+            (Stage::Data, None, Some(sender), Some(sender)),
+            (Stage::Data, Some(SpfResult::Fail), Some(sender), Some(sender)),
+            (Stage::Data, Some(SpfResult::None), Some(sender), Some(sender)),
+            (Stage::Data, Some(SpfResult::Pass), Some(sender), Some("other@example.test")),
+            (Stage::Data, Some(SpfResult::Pass), Some(sender), Some("partner@other.test")),
+            // Missing checked identity (including reset) never inherits proof.
+            (Stage::Data, Some(SpfResult::Pass), None, Some(sender)),
+            (Stage::Data, None, None, None),
+            (Stage::Data, Some(SpfResult::Pass), Some(sender), None),
+            (Stage::Data, Some(SpfResult::Pass), Some(""), Some("")),
+        ] {
+            assert!(verified_envelope_sender(stage, result, checked, current).is_none());
+        }
+    }
+}
+
 impl<T: SessionStream> Session<T> {
     pub async fn run_mta_hooks(
         &self,
@@ -179,6 +224,12 @@ impl<T: SessionStream> Session<T> {
         let (tls_version, tls_cipher) = self.stream.tls_version_and_cipher();
         let request = Request {
             context: Context {
+                verified_envelope_sender: verified_envelope_sender(
+                    stage,
+                    self.data.spf_mail_from.as_ref().map(|spf| spf.result()),
+                    self.data.spf_checked_sender.as_deref(),
+                    self.data.mail_from.as_ref().map(|from| from.address_lcase.as_str()),
+                ),
                 stage: stage.into(),
                 client: Client {
                     ip: self.data.remote_ip.to_string(),
