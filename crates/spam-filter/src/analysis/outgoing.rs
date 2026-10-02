@@ -9,14 +9,21 @@ use common::{Server, config::mailstore::spamfilter::SpamFilterAction};
 use crate::{SpamFilterInput, analysis::{init::SpamFilterInit, score::SpamFilterAnalyzeScore}};
 
 pub trait SpamFilterScoreOutgoing: Sync + Send {
+    /// `not_counted`: tags that describe how the message travels rather than its
+    /// content for this path (listed with `*`, not added to the total).
     fn spam_score_outgoing_input(
         &self,
         input: SpamFilterInput<'_>,
+        not_counted: &[&str],
     ) -> impl std::future::Future<Output = Option<(f32, String)>> + Send;
 }
 
 impl SpamFilterScoreOutgoing for Server {
-    async fn spam_score_outgoing_input(&self, input: SpamFilterInput<'_>) -> Option<(f32, String)> {
+    async fn spam_score_outgoing_input(
+        &self,
+        input: SpamFilterInput<'_>,
+        not_counted: &[&str],
+    ) -> Option<(f32, String)> {
         if !self.core.spam.enabled {
             return None;
         }
@@ -34,7 +41,7 @@ impl SpamFilterScoreOutgoing for Server {
                 None | Some(SpamFilterAction::Disabled) => 0.0,
             };
             if score == 0.0 { continue; }
-            let infra = is_infrastructure_tag(tag);
+            let infra = is_infrastructure_tag(tag) || not_counted.contains(&tag.as_str());
             if !infra { total += score; }
             listed.push((tag.as_str(), score, infra));
         }
@@ -57,6 +64,10 @@ fn is_infrastructure_tag(tag: &str) -> bool {
     ];
     PREFIXES.iter().any(|p| tag.starts_with(p))
 }
+
+/// A Sieve redirect keeps the original header From/To while the envelope is the
+/// forwarding account and the new recipient, so these tags fire by construction.
+pub const SIEVE_FORWARDING_TAGS: &[&str] = &["FORGED_RECIPIENTS", "FORGED_SENDER"];
 
 #[cfg(test)]
 mod tests {

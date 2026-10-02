@@ -42,6 +42,55 @@ fn verified_envelope_sender(
         .then(|| current_sender.to_owned())
 }
 
+/// The single header From is DKIM-verified when a passing signature by its
+/// domain (or a parent domain) covers the From header and has no `l=` limit.
+/// Several From addresses never qualify. Domain authority, not a person.
+pub(crate) fn dkim_verified_from(
+    froms: &[String],
+    dkim: &[mail_auth::DkimOutput<'_>],
+) -> Option<String> {
+    let [from] = froms else { return None };
+    dkim.iter()
+        .any(|output| {
+            matches!(output.result(), mail_auth::DkimResult::Pass)
+                && output
+                    .signature()
+                    .is_some_and(|s| signature_vouches_for(from, &s.d, s.l, &s.h))
+        })
+        .then(|| from.clone())
+}
+
+fn signature_vouches_for(from: &str, d: &str, l: u64, signed_headers: &[String]) -> bool {
+    let Some((_, domain)) = from.rsplit_once('@') else { return false };
+    let d = d.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.trim_end_matches('.');
+    !d.is_empty()
+        && l == 0
+        && signed_headers.iter().any(|h| h.eq_ignore_ascii_case("from"))
+        && (domain == d || domain.ends_with(&format!(".{d}")))
+}
+
+#[cfg(test)]
+mod dkim_from_tests {
+    use super::signature_vouches_for;
+
+    #[test]
+    fn aligned_signature_covering_from_without_length_limit() {
+        let h = vec!["From".to_string(), "Subject".to_string()];
+        assert!(signature_vouches_for("partner@example.test", "example.test", 0, &h));
+        assert!(signature_vouches_for("partner@mail.example.test", "example.test", 0, &h));
+        assert!(signature_vouches_for("partner@example.test", "EXAMPLE.test.", 0, &h));
+        // unrelated or sibling signer, body length limit, From not signed
+        assert!(!signature_vouches_for("partner@example.test", "other.test", 0, &h));
+        assert!(!signature_vouches_for("partner@example.test", "mail.example.test", 0, &h));
+        assert!(!signature_vouches_for("partner@badexample.test", "example.test", 0, &h));
+        assert!(!signature_vouches_for("partner@example.test", "example.test", 120, &h));
+        assert!(!signature_vouches_for("partner@example.test", "example.test", 0,
+            &["Subject".to_string()]));
+        assert!(!signature_vouches_for("partner@example.test", "", 0, &h));
+    }
+}
+
 #[cfg(test)]
 mod sender_proof_tests {
     use super::{Stage, verified_envelope_sender};
@@ -230,6 +279,11 @@ impl<T: SessionStream> Session<T> {
                     self.data.spf_checked_sender.as_deref(),
                     self.data.mail_from.as_ref().map(|from| from.address_lcase.as_str()),
                 ),
+                dkim_verified_from: if stage == Stage::Data {
+                    self.data.dkim_verified_from.clone()
+                } else {
+                    None
+                },
                 stage: stage.into(),
                 client: Client {
                     ip: self.data.remote_ip.to_string(),
