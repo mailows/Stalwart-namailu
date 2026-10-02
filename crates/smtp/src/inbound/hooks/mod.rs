@@ -22,6 +22,9 @@ pub struct Request {
 
 #[derive(Serialize, Deserialize)]
 pub struct Context {
+    /// Server-created SPF evidence for the exact non-null MAIL FROM; never a header.
+    #[serde(rename = "verifiedEnvelopeSender", skip_serializing_if = "Option::is_none", default)]
+    pub verified_envelope_sender: Option<String>,
     pub stage: Stage,
     pub client: Client,
     #[serde(skip_serializing_if = "Option::is_none")]

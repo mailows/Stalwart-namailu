@@ -12,12 +12,13 @@ types = { path = "../types" }
 jmap_proto = { path = "../jmap-proto" }
 jmap-tools = { version = "0.1" }
 common = { path =  "../common" }
+spam-filter = { path = "../spam-filter" }
 groupware = { path =  "../groupware" }
 registry = { path =  "../registry" }
 mail-parser = { version = "0.11", features = ["full_encoding"] } 
 mail-builder = { version = "1.0" }
 sieve-rs = { version = "0.7", features = ["rkyv"] } 
-tokio = { version = "1.53", features = ["net", "macros"] }
+tokio = { version = "1.53", features = ["net", "macros", "time"] }
 aes = "0.9"
 aes-gcm = "0.11.1"
 chacha20poly1305 = "0.11"
