@@ -239,13 +239,25 @@ mod tests {
     }
 }
 
-pub(crate) async fn sieve_outbound_allowed(
+/// Outcome of the RCPT MTA hook for one recipient of a generated Sieve message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SieveRcptCheck {
+    /// Allowed; the hook has reserved quota for this recipient.
+    Allowed,
+    /// Definitive refusal (quota, suspension, policy).
+    Denied,
+    /// Hook unreachable, timeout, 5xx or 4xx tempfail: nothing was reserved, so the
+    /// queue asks again later (`RCPT_SIEVE_UNCHECKED`) before any delivery.
+    Unavailable,
+}
+
+pub async fn sieve_outbound_check(
     server: &Server,
     account: &str,
     recipient: &str,
     is_redirect: bool,
     session_id: u64,
-) -> bool {
+) -> SieveRcptCheck {
     let Some(hook) = server
         .core
         .smtp
@@ -254,7 +266,7 @@ pub(crate) async fn sieve_outbound_allowed(
         .iter()
         .find(|hook| hook.run_on_stage.contains(&Stage::Rcpt))
     else {
-        return false;
+        return SieveRcptCheck::Unavailable;
     };
 
     let body = serde_json::json!({
@@ -281,14 +293,8 @@ pub(crate) async fn sieve_outbound_allowed(
         Ok(response) if response.status().is_success() => {
             match response.bytes_with_limit(hook.max_response_size).await {
                 Ok(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("action")
-                            .and_then(|action| action.as_str())
-                            .map(|action| action == "accept")
-                    })
-                    .ok_or("invalid hook response"),
+                    .map(|value| rcpt_verdict(&value))
+                    .map_err(|_| "invalid hook response"),
                 Ok(None) => Err("hook response too large"),
                 Err(_) => Err("failed to read hook response"),
             }
@@ -298,8 +304,7 @@ pub(crate) async fn sieve_outbound_allowed(
     };
 
     match verdict {
-        Ok(true) => true,
-        Ok(false) => {
+        Ok(SieveRcptCheck::Denied) => {
             trc::event!(
                 Sieve(SieveEvent::QuotaExceeded),
                 From = account.to_string(),
@@ -307,7 +312,18 @@ pub(crate) async fn sieve_outbound_allowed(
                 Details = "Outgoing Sieve message rejected by MTA hook.",
                 SpanId = session_id
             );
-            false
+            SieveRcptCheck::Denied
+        }
+        Ok(check) => check,
+        Err("invalid hook response") => {
+            trc::event!(
+                Sieve(SieveEvent::UnexpectedError),
+                From = account.to_string(),
+                To = recipient.to_string(),
+                Details = "invalid hook response",
+                SpanId = session_id
+            );
+            SieveRcptCheck::Denied
         }
         Err(reason) => {
             trc::event!(
@@ -317,7 +333,34 @@ pub(crate) async fn sieve_outbound_allowed(
                 Details = reason,
                 SpanId = session_id
             );
-            false
+            SieveRcptCheck::Unavailable
         }
+    }
+}
+
+/// `accept` allows; a `reject` with a 4xx response is a temporary failure.
+fn rcpt_verdict(value: &serde_json::Value) -> SieveRcptCheck {
+    match value.get("action").and_then(|a| a.as_str()) {
+        Some("accept") => SieveRcptCheck::Allowed,
+        Some("reject")
+            if value.pointer("/response/status").and_then(|s| s.as_u64())
+                .is_some_and(|status| (400..500).contains(&status)) => SieveRcptCheck::Unavailable,
+        _ => SieveRcptCheck::Denied,
+    }
+}
+
+#[cfg(test)]
+mod rcpt_tests {
+    use super::{SieveRcptCheck, rcpt_verdict};
+
+    #[test]
+    fn rcpt_tempfail_waits_and_refusal_is_final() {
+        assert_eq!(rcpt_verdict(&serde_json::json!({"action": "accept"})), SieveRcptCheck::Allowed);
+        assert_eq!(rcpt_verdict(&serde_json::json!({"action": "reject",
+            "response": {"status": 451}})), SieveRcptCheck::Unavailable);
+        assert_eq!(rcpt_verdict(&serde_json::json!({"action": "reject",
+            "response": {"status": 550}})), SieveRcptCheck::Denied);
+        assert_eq!(rcpt_verdict(&serde_json::json!({"action": "quarantine"})), SieveRcptCheck::Denied);
+        assert_eq!(rcpt_verdict(&serde_json::json!({})), SieveRcptCheck::Denied);
     }
 }
