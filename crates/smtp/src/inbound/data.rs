@@ -618,6 +618,13 @@ impl<T: SessionStream> Session<T> {
             }
         }
 
+        // Fork: DKIM evidence for the header From, used by the MTA hook as the
+        // allowlist fallback when forwarding breaks SPF of the original sender.
+        self.data.dkim_verified_from = crate::inbound::hooks::message::dkim_verified_from(
+            auth_message.froms(),
+            &dkim_output,
+        );
+
         // Run Milter filters
         let mut modifications = Vec::new();
         match self

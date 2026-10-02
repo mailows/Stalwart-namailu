@@ -495,6 +495,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.rcpt_oks = 0;
         self.data.spam_score = None;
         self.data.spam_tags = None;
+        self.data.dkim_verified_from = None;
     }
 
     pub fn reset_tls(&mut self) {

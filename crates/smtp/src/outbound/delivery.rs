@@ -220,6 +220,21 @@ impl QueuedMessage {
             }
         }
 
+        // Fork: generated Sieve copy that has not passed the final DATA scan yet.
+        if message.scan_pending_gate(&server).await {
+            trc::event!(
+                Queue(trc::QueueEvent::Rescheduled),
+                SpanId = span_id,
+                NextRetry = message
+                    .message
+                    .next_delivery_event(None)
+                    .map(trc::Value::Timestamp),
+                Details = "Waiting for the final Sieve DATA scan.",
+            );
+            message.save_changes(&server, self.due.into(), None).await;
+            return QueueEventStatus::Deferred;
+        }
+
         // Group recipients by route
         let queue_config = &server.core.smtp.queue;
         let now_ = now();
