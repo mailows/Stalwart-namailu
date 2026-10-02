@@ -91,6 +91,8 @@ pub struct SessionData {
     pub iprev: Option<IprevOutput>,
     pub spf_ehlo: Option<SpfOutput>,
     pub spf_mail_from: Option<SpfOutput>,
+    /// Exact identity evaluated by SPF; later envelope rewrites cannot relabel it.
+    pub spf_checked_sender: Option<String>,
     pub dnsbl_error: Option<Vec<u8>>,
     /// Fork: spam filter score of the message being processed, passed to the DATA-stage
     /// MTA hook (`serverHeaders`, `X-Spam-Score`) so it can apply its own policy, e.g. a
@@ -173,6 +175,7 @@ impl SessionData {
             iprev: None,
             spf_ehlo: None,
             spf_mail_from: None,
+            spf_checked_sender: None,
             dnsbl_error: None,
             spam_score: None,
             spam_tags: None,
@@ -298,6 +301,7 @@ impl SessionData {
             iprev: None,
             spf_ehlo: None,
             spf_mail_from: None,
+            spf_checked_sender: None,
             dnsbl_error: None,
             spam_score: None,
             spam_tags: None,

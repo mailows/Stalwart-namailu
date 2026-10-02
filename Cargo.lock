@@ -2400,6 +2400,7 @@ dependencies = [
  "sequoia-openpgp",
  "serde_json",
  "sieve-rs",
+ "spam-filter",
  "store",
  "tokio",
  "trc",

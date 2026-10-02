@@ -26,6 +26,7 @@ pub mod init;
 pub mod ip;
 pub mod messageid;
 pub mod mime;
+pub mod outgoing;
 mod mime_types;
 pub mod pyzor;
 pub mod received;
