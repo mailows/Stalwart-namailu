@@ -11,21 +11,34 @@
 //! being dropped. Before any delivery attempt the queue scans it again:
 //! accept clears the flag, a definitive rejection fails every recipient (DSN to
 //! the account), an outage reschedules with the queue retry policy and expiry.
-//! The RCPT quota reserved at generation time is not reserved again.
+//! The RCPT quota reserved at generation time is not reserved again; a recipient
+//! whose RCPT hook did not answer then (`RCPT_SIEVE_UNCHECKED`) is asked here
+//! first, exactly once per successful answer.
 
-use crate::queue::{Error, ErrorDetails, FROM_SCAN_PENDING, MessageWrapper, Status};
+use crate::queue::{
+    Error, ErrorDetails, FROM_SCAN_PENDING, FROM_SIEVE_REDIRECT, MessageWrapper,
+    RCPT_SIEVE_UNCHECKED, Status,
+};
 use common::Server;
-use email::sieve::outbound_hook::{SieveDataScan, sieve_data_scan};
+use email::sieve::outbound_hook::{
+    SieveDataScan, SieveRcptCheck, sieve_data_scan, sieve_outbound_check,
+};
 use store::write::now;
 
 impl MessageWrapper {
     /// Returns `true` when delivery must stop now (message saved for a later scan).
     pub(super) async fn scan_pending_gate(&mut self, server: &Server) -> bool {
-        if self.message.flags & FROM_SCAN_PENDING == 0 {
+        if self.message.flags & FROM_SCAN_PENDING == 0
+            && !self
+                .message
+                .recipients
+                .iter()
+                .any(|rcpt| rcpt.flags & RCPT_SIEVE_UNCHECKED != 0)
+        {
             return false;
         }
         let now = now();
-        let due: Vec<usize> = self
+        let mut due: Vec<usize> = self
             .message
             .recipients
             .iter()
@@ -38,6 +51,53 @@ impl MessageWrapper {
             .map(|(idx, _)| idx)
             .collect();
         if due.is_empty() {
+            return false;
+        }
+
+        // RCPT permission and quota for recipients nobody has asked about yet.
+        let is_redirect = self.message.flags & FROM_SIEVE_REDIRECT != 0;
+        let mut waiting = false;
+        for &idx in &due {
+            if self.message.recipients[idx].flags & RCPT_SIEVE_UNCHECKED == 0 {
+                continue;
+            }
+            let address = self.message.recipients[idx].address().to_string();
+            match sieve_outbound_check(
+                server,
+                &self.message.return_path,
+                &address,
+                is_redirect,
+                self.span_id,
+            )
+            .await
+            {
+                SieveRcptCheck::Allowed => {
+                    self.message.recipients[idx].flags &= !RCPT_SIEVE_UNCHECKED;
+                }
+                SieveRcptCheck::Denied => {
+                    self.message.recipients[idx].flags &= !RCPT_SIEVE_UNCHECKED;
+                    self.message.recipients[idx].status = Status::PermanentFailure(ErrorDetails {
+                        entity: "localhost".into(),
+                        details: Error::Io("Recipient refused by outgoing policy.".into()),
+                    });
+                }
+                SieveRcptCheck::Unavailable => waiting = true,
+            }
+        }
+        due.retain(|&idx| {
+            matches!(
+                &self.message.recipients[idx].status,
+                Status::Scheduled | Status::TemporaryFailure(_)
+            )
+        });
+        if due.is_empty() {
+            return false;
+        }
+        if waiting {
+            self.reschedule_scan(&due, server).await;
+            return true;
+        }
+        if self.message.flags & FROM_SCAN_PENDING == 0 {
             return false;
         }
 
@@ -84,19 +144,23 @@ impl MessageWrapper {
                 false
             }
             SieveDataScan::Unavailable => {
-                for idx in due {
-                    self.set_rcpt_status(
-                        Status::TemporaryFailure(ErrorDetails {
-                            entity: "localhost".into(),
-                            details: Error::Io("Final content scan unavailable.".into()),
-                        }),
-                        idx,
-                        server,
-                    )
-                    .await;
-                }
+                self.reschedule_scan(&due, server).await;
                 true
             }
+        }
+    }
+
+    async fn reschedule_scan(&mut self, due: &[usize], server: &Server) {
+        for &idx in due {
+            self.set_rcpt_status(
+                Status::TemporaryFailure(ErrorDetails {
+                    entity: "localhost".into(),
+                    details: Error::Io("Outgoing policy or content scan unavailable.".into()),
+                }),
+                idx,
+                server,
+            )
+            .await;
         }
     }
 }
