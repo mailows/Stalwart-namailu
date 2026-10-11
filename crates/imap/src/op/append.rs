@@ -10,7 +10,7 @@ use crate::{
     spawn_op,
 };
 use common::{auth::BuildAccessToken, ipc::PushNotification, network::SessionStream};
-use email::message::ingest::{EmailIngest, IngestEmail, IngestSource};
+use email::message::ingest::{EmailIngest, IngestEmail, IngestSource, strip_untrusted_ingest_headers};
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
     protocol::{append::Arguments, select::HighestModSeq},
@@ -122,11 +122,13 @@ impl<T: SessionStream> SessionData<T> {
         let mut created_ids = Vec::with_capacity(arguments.messages.len());
         let mut last_change_id = None;
         for message in arguments.messages {
+            let sanitized = strip_untrusted_ingest_headers(&message.message);
+            let imported_raw: &[u8] = sanitized.as_deref().unwrap_or(&message.message);
             match self
                 .server
                 .email_ingest(IngestEmail {
-                    raw_message: &message.message,
-                    message: MessageParser::new().parse(&message.message),
+                    raw_message: imported_raw,
+                    message: MessageParser::new().parse(imported_raw),
                     blob_hash: None,
                     access_token: &access_token,
                     mailbox_ids: vec![mailbox_id],
