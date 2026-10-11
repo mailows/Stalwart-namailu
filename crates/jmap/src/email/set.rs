@@ -18,7 +18,7 @@ use email::{
     mailbox::{JUNK_ID, TRASH_ID, UidMailbox},
     message::{
         delete::EmailDeletion,
-        ingest::{EmailIngest, IngestEmail, IngestSource},
+        ingest::{EmailIngest, IngestEmail, IngestSource, strip_untrusted_ingest_headers},
         metadata::MessageData,
     },
 };
@@ -766,6 +766,9 @@ impl EmailSet for Server {
             // Build message
             let mut raw_message = Vec::with_capacity((4 * size_attachments / 3) + 1024);
             builder.write_to(&mut raw_message).unwrap_or_default();
+            if let Some(sanitized) = strip_untrusted_ingest_headers(&raw_message) {
+                raw_message = sanitized;
+            }
 
             // Ingest message
             match self
