@@ -32,7 +32,13 @@ use registry::{
     types::{EnumImpl, ObjectImpl, datetime::UTCDateTime, id::ObjectId, map::Map},
 };
 use std::future::Future;
-use std::{borrow::Cow, cmp::Ordering, fmt::Write, time::Instant};
+use std::{
+    borrow::Cow,
+    cmp::Ordering,
+    fmt::Write,
+    time::{Duration, Instant},
+};
+use sha2::{Digest, Sha256};
 use store::write::{AlignedBytes, Archive, RegistryClass};
 use store::{
     IndexKeyPrefix, IterateParams, SerializeInfallible, U32_LEN, ValueKey,
@@ -52,7 +58,60 @@ use types::{
     keyword::Keyword,
     special_use::SpecialUse,
 };
-use utils::{cheeky_hash::CheekyHash, sanitize_email, snowflake::SnowflakeIdGenerator};
+use utils::{
+    HttpLimitResponse, cheeky_hash::CheekyHash, sanitize_email, snowflake::SnowflakeIdGenerator,
+};
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClientAppendScanError {
+    Blocked,
+    Unavailable,
+}
+
+/// JMAP Email/import, Email/set and IMAP APPEND do not traverse SMTP DATA.
+/// Reuse the authenticated, TLS-verified MTA scanner client before persisting
+/// their bytes. A missing/misconfigured scanner is a temporary failure, never
+/// permission to store an unchecked message.
+async fn scan_client_append(server: &Server, raw: &[u8]) -> Result<(), ClientAppendScanError> {
+    let mut matching = server.core.smtp.session.hooks.iter().filter(|hook| {
+        hook.url.starts_with("https://") && hook.url.ends_with("/mta-hook")
+    });
+    let hook = matching.next().ok_or(ClientAppendScanError::Unavailable)?;
+    if matching.next().is_some() {
+        return Err(ClientAppendScanError::Unavailable);
+    }
+    let url = format!("{}/scan-message", hook.url.trim_end_matches("/mta-hook"));
+    let mut headers = hook.headers.clone();
+    headers.insert("content-type", "application/octet-stream".parse().expect("static header"));
+    let response = hook.client.post(url)
+        .timeout(Duration::from_secs(30))
+        .headers(headers)
+        .body(raw.to_vec())
+        .send().await.map_err(|_| ClientAppendScanError::Unavailable)?;
+    if !response.status().is_success() {
+        return Err(ClientAppendScanError::Unavailable);
+    }
+    let body = response.bytes_with_limit(4096).await
+        .map_err(|_| ClientAppendScanError::Unavailable)?
+        .ok_or(ClientAppendScanError::Unavailable)?;
+    append_scan_verdict(raw, &body)
+}
+
+fn append_scan_verdict(raw: &[u8], body: &[u8]) -> Result<(), ClientAppendScanError> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| ClientAppendScanError::Unavailable)?;
+    let expected_hash = format!("{:x}", Sha256::digest(raw));
+    if value.get("engine").and_then(|value| value.as_str()) != Some("clamav")
+        || value.get("sha256").and_then(|value| value.as_str()) != Some(expected_hash.as_str())
+    {
+        return Err(ClientAppendScanError::Unavailable);
+    }
+    match value.get("status").and_then(|value| value.as_str()) {
+        Some("clean" | "unscannable_encrypted" | "unscannable_archive") => Ok(()),
+        Some("malware" | "suspicious" | "limit") => Err(ClientAppendScanError::Blocked),
+        _ => Err(ClientAppendScanError::Unavailable),
+    }
+}
 
 /// JMAP Email/import, Email/set and IMAP APPEND store client-provided bytes
 /// without the SMTP DATA hook.  Remove server-owned verdicts on all three
@@ -104,7 +163,28 @@ pub fn strip_untrusted_ingest_headers(raw: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod namailu_import_tests {
-    use super::strip_untrusted_ingest_headers;
+    use super::{ClientAppendScanError, append_scan_verdict, strip_untrusted_ingest_headers};
+    use sha2::{Digest, Sha256};
+
+    fn verdict(raw: &[u8], status: &str) -> Vec<u8> {
+        serde_json::json!({
+            "status": status,
+            "engine": "clamav",
+            "sha256": format!("{:x}", Sha256::digest(raw)),
+        }).to_string().into_bytes()
+    }
+
+    #[test]
+    fn direct_append_requires_matching_scanner_digest_and_allowed_verdict() {
+        let raw = b"Subject: direct append\r\n\r\nbody";
+        assert_eq!(append_scan_verdict(raw, &verdict(raw, "clean")), Ok(()));
+        assert_eq!(append_scan_verdict(raw, &verdict(raw, "unscannable_encrypted")), Ok(()));
+        assert_eq!(append_scan_verdict(raw, &verdict(raw, "malware")),
+                   Err(ClientAppendScanError::Blocked));
+        assert_eq!(append_scan_verdict(raw, &verdict(b"other", "clean")),
+                   Err(ClientAppendScanError::Unavailable));
+        assert_eq!(append_scan_verdict(raw, b"{}"), Err(ClientAppendScanError::Unavailable));
+    }
 
     #[test]
     fn imported_headers_cannot_claim_scanner_spam_or_sender_auth_verdicts() {
@@ -230,6 +310,18 @@ impl EmailIngest for Server {
         self.has_available_quota(&account, raw_message_len)
             .await
             .caused_by(trc::location!())?;
+
+        if matches!(params.source, IngestSource::Jmap { .. } | IngestSource::Imap { .. }) {
+            if let Err(reason) = scan_client_append(self, params.raw_message).await {
+                let (code, message) = match reason {
+                    ClientAppendScanError::Blocked => (550, "Client-appended message blocked by scanner."),
+                    ClientAppendScanError::Unavailable => (451, "Client-append scanner unavailable."),
+                };
+                return Err(trc::EventType::MessageIngest(trc::MessageIngestEvent::Error)
+                    .ctx(trc::Key::Code, code)
+                    .ctx(trc::Key::Reason, message));
+            }
+        }
 
         // Parse message
         let mut raw_message = Cow::from(params.raw_message);

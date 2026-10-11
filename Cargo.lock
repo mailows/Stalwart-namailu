@@ -2399,6 +2399,7 @@ dependencies = [
  "rsa",
  "sequoia-openpgp",
  "serde_json",
+ "sha2 0.10.9",
  "sieve-rs",
  "spam-filter",
  "store",
