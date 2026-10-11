@@ -32,6 +32,7 @@ sequoia-openpgp = { version = "2.4", default-features = false, features = ["cryp
 hashify = "0.2"
 rkyv = { version = "0.8.18", features = ["little_endian"] }
 serde_json = "1.0"
+sha2 = "0.10"
 
 [features]
 test_mode = []

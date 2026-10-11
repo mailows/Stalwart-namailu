@@ -18,6 +18,11 @@ bypassing the SMTP DATA hook that writes `X-Namailu-Scan-*`. `strip_untrusted_in
 removes `X-Namailu-*`, `X-Spam-*`, `Authentication-Results` and `Received-SPF` (with folded
 continuations, bare CR line ends and whitespace before the colon) before parsing and storing,
 so an imported file cannot claim to be ClamAV-clean or carry a forged DKIM/SPF verdict.
+Before storing, the same bytes go to the content scanner's `/scan-message` (URL derived from
+the single HTTPS `/mta-hook` hook, same Bearer auth and TLS). The response must carry
+`engine=clamav` and the SHA-256 of the exact bytes; `malware`/`suspicious`/`limit` → 550,
+scanner unreachable, misconfigured or more than one matching hook → 451 (fail closed).
+This applies to every client write, including webmail drafts and Sent copies.
 The control plane additionally rescans attachment bytes on every API/MCP download.
 
 ## Outgoing Sieve mail asks the MTA hook
