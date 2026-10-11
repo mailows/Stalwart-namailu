@@ -1,6 +1,6 @@
 # Namailu fork of Stalwart 0.16.23
 
-Five changes on top of upstream `v0.16.23`; everything else is untouched.
+Six changes on top of upstream `v0.16.23`; everything else is untouched.
 
 | area | change |
 |---|---|
@@ -9,6 +9,16 @@ Five changes on top of upstream `v0.16.23`; everything else is untouched.
 | `crates/directory/src/backend/oidc/*`, `crates/directory/src/core/dispatch.rs` and its two callers | OIDC discovery is fetched lazily and retried; a provider that is down at boot no longer leaves the directory dead (below) |
 | `crates/email/src/sieve/outbound_hook.rs`, `crates/email/src/sieve/ingest.rs` | mail sent by a user Sieve script (redirect, vacation, notify) asks the RCPT-stage MTA hook first (below) |
 | `crates/smtp/src/core/mod.rs`, `crates/smtp/src/inbound/{data,session}.rs`, `crates/smtp/src/inbound/hooks/message.rs` | the DATA-stage MTA hook receives the spam filter score as `serverHeaders` `X-Spam-Score` (below) |
+| `crates/email/src/message/ingest.rs`, `crates/jmap/src/email/{import,set}.rs`, `crates/imap/src/op/append.rs` | client ingest (JMAP `Email/import`, `Email/set`, IMAP `APPEND`) strips server-owned verdict headers (below) |
+
+## Client ingest cannot carry server verdicts
+
+JMAP `Email/import`, `Email/set` and IMAP `APPEND` store bytes the client supplies,
+bypassing the SMTP DATA hook that writes `X-Namailu-Scan-*`. `strip_untrusted_ingest_headers`
+removes `X-Namailu-*`, `X-Spam-*`, `Authentication-Results` and `Received-SPF` (with folded
+continuations, bare CR line ends and whitespace before the colon) before parsing and storing,
+so an imported file cannot claim to be ClamAV-clean or carry a forged DKIM/SPF verdict.
+The control plane additionally rescans attachment bytes on every API/MCP download.
 
 ## Outgoing Sieve mail asks the MTA hook
 

@@ -11,7 +11,7 @@ use common::{Server, auth::AccessToken, ipc::PushNotification};
 use email::{
     cache::{MessageCacheFetch, mailbox::MailboxCacheAccess},
     mailbox::JUNK_ID,
-    message::ingest::{EmailIngest, IngestEmail, IngestSource},
+    message::ingest::{EmailIngest, IngestEmail, IngestSource, strip_untrusted_ingest_headers},
 };
 use http_proto::HttpSessionData;
 use jmap_proto::{
@@ -151,8 +151,12 @@ impl EmailImport for Server {
                 }
             };
 
-            // Import message
-            let parsed = MessageParser::new().parse(&raw_message);
+            // A JMAP client can upload arbitrary RFC 5322 headers.  Strip
+            // server-owned verdicts before parsing/storing, not only in the
+            // portal importer; direct JMAP clients need the same boundary.
+            let sanitized = strip_untrusted_ingest_headers(&raw_message);
+            let imported_raw: &[u8] = sanitized.as_deref().unwrap_or(&raw_message);
+            let parsed = MessageParser::new().parse(imported_raw);
             let is_valid_message = parsed.as_ref().is_some_and(|message| {
                 message
                     .headers()
@@ -169,9 +173,9 @@ impl EmailImport for Server {
             }
             match self
                 .email_ingest(IngestEmail {
-                    raw_message: &raw_message,
+                    raw_message: imported_raw,
                     message: parsed,
-                    blob_hash: Some(&blob_id.hash),
+                    blob_hash: if sanitized.is_some() { None } else { Some(&blob_id.hash) },
                     access_token: import_access_token.as_ref().unwrap_or(access_token),
                     source: IngestSource::Jmap {
                         train_classifier: email

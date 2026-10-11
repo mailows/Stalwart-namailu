@@ -54,6 +54,85 @@ use types::{
 };
 use utils::{cheeky_hash::CheekyHash, sanitize_email, snowflake::SnowflakeIdGenerator};
 
+/// JMAP Email/import, Email/set and IMAP APPEND store client-provided bytes
+/// without the SMTP DATA hook.  Remove server-owned verdicts on all three
+/// paths; otherwise a client could claim an unscanned file is ClamAV-clean.
+pub fn strip_untrusted_ingest_headers(raw: &[u8]) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(raw.len());
+    let mut changed = false;
+    let mut skip = false;
+    let mut in_headers = true;
+    let mut offset = 0;
+    while offset < raw.len() {
+        let start = offset;
+        while offset < raw.len() && raw[offset] != b'\n' && raw[offset] != b'\r' {
+            offset += 1;
+        }
+        let content_end = offset;
+        if offset < raw.len() {
+            let was_cr = raw[offset] == b'\r';
+            offset += 1;
+            if was_cr && offset < raw.len() && raw[offset] == b'\n' {
+                offset += 1;
+            }
+        }
+        let line = &raw[start..offset];
+        let content = &raw[start..content_end];
+        if in_headers {
+            if content.is_empty() {
+                in_headers = false;
+                skip = false;
+            } else if !content.starts_with(b" ") && !content.starts_with(b"\t") {
+                let mut name = content.split(|byte| *byte == b':').next().unwrap_or_default();
+                while name.last().is_some_and(|byte| *byte == b' ' || *byte == b'\t') {
+                    name = &name[..name.len() - 1];
+                }
+                skip = name.eq_ignore_ascii_case(b"authentication-results")
+                    || name.eq_ignore_ascii_case(b"received-spf")
+                    || (name.len() >= 10 && name[..10].eq_ignore_ascii_case(b"x-namailu-"))
+                    || (name.len() >= 7 && name[..7].eq_ignore_ascii_case(b"x-spam-"));
+            }
+        }
+        if skip {
+            changed = true;
+        } else {
+            output.extend_from_slice(line);
+        }
+    }
+    changed.then_some(output)
+}
+
+#[cfg(test)]
+mod namailu_import_tests {
+    use super::strip_untrusted_ingest_headers;
+
+    #[test]
+    fn imported_headers_cannot_claim_scanner_spam_or_sender_auth_verdicts() {
+        let raw = b"From: a@example.test\r\n\
+X-Namailu-Scan-Status: clean\r\n\
+ folded fake value\r\n\
+X-Namailu-Scan-Engine: clamav\r\n\
+Authentication-Results: namailu.cz; dkim=pass\r\n\
+X-Spam-Status: No\r\n\
+Subject: history\r\n\r\nbody\xff";
+        let cleaned = strip_untrusted_ingest_headers(raw).unwrap();
+        assert_eq!(cleaned, b"From: a@example.test\r\nSubject: history\r\n\r\nbody\xff");
+    }
+
+    #[test]
+    fn ordinary_import_bytes_are_preserved() {
+        let raw = b"From: a@example.test\nSubject: sent history\n\nbody";
+        assert!(strip_untrusted_ingest_headers(raw).is_none());
+    }
+
+    #[test]
+    fn bare_cr_and_space_before_colon_do_not_bypass_header_stripping() {
+        let raw = b"From: a@example.test\rX-Namailu-Scan-Status : clean\r\rbody";
+        assert_eq!(strip_untrusted_ingest_headers(raw).unwrap(),
+                   b"From: a@example.test\r\rbody");
+    }
+}
+
 #[derive(Default)]
 pub struct IngestedEmail {
     pub document_id: u32,
