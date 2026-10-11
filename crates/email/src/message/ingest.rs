@@ -190,7 +190,7 @@ mod namailu_import_tests {
     fn imported_headers_cannot_claim_scanner_spam_or_sender_auth_verdicts() {
         let raw = b"From: a@example.test\r\n\
 X-Namailu-Scan-Status: clean\r\n\
- folded fake value\r\n\
+\x20folded fake value\r\n\
 X-Namailu-Scan-Engine: clamav\r\n\
 Authentication-Results: namailu.cz; dkim=pass\r\n\
 X-Spam-Status: No\r\n\
