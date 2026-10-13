@@ -86,6 +86,13 @@ impl<T: SessionStream> Session<T> {
                             return trc::AuthEvent::TooManyAttempts.into_err().caused_by(err);
                         }
                     }
+                } else if err.matches(trc::EventType::Auth(trc::AuthEvent::Error)) {
+                    // naMailu fork: backend error, not a wrong password (RFC 3206 SYS/TEMP,
+                    // RESP-CODES is advertised). See the IMAP counterpart.
+                    return err.ctx_unique(
+                        trc::Key::Details,
+                        "[SYS/TEMP] Temporary authentication failure, try again later.",
+                    );
                 }
 
                 err

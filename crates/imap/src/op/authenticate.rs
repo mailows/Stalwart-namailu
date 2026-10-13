@@ -89,6 +89,13 @@ impl<T: SessionStream> Session<T> {
                             .caused_by(err)
                             .id(tag.clone());
                     }
+                } else if err.matches(trc::EventType::Auth(trc::AuthEvent::Error)) {
+                    // naMailu fork: the directory could not decide (e.g. the password
+                    // verification endpoint answered 502 during a deploy). Answering
+                    // AUTHENTICATIONFAILED here makes clients such as iOS Mail treat the
+                    // stored password as wrong and stop using it, so report a temporary
+                    // failure instead (RFC 5530 UNAVAILABLE); the client retries later.
+                    return temporary_auth_failure(err).id(tag.clone());
                 }
 
                 err.id(tag.clone())
@@ -145,5 +152,37 @@ impl<T: SessionStream> Session<T> {
                 .into_bytes(),
         )
         .await
+    }
+}
+
+/// naMailu fork: an authentication backend error is a temporary condition, not
+/// a rejected credential. The original reason stays in the event for the log.
+pub(crate) fn temporary_auth_failure(err: trc::Error) -> trc::Error {
+    err.ctx_unique(trc::Key::Code, ResponseCode::Unavailable.as_str())
+        .ctx_unique(
+            trc::Key::Details,
+            "Temporary authentication failure, try again later.",
+        )
+}
+
+#[cfg(test)]
+mod namailu_tests {
+    use super::temporary_auth_failure;
+    use imap_proto::protocol::SerializeResponse;
+
+    #[test]
+    fn backend_error_is_unavailable_not_authenticationfailed() {
+        let err = trc::AuthEvent::Error
+            .into_err()
+            .reason("Provider error: Password verification endpoint returned HTTP 502");
+        let line = String::from_utf8(temporary_auth_failure(err).id("a1").serialize()).unwrap();
+        assert!(line.starts_with("a1 NO [UNAVAILABLE] "), "{line}");
+        assert!(!line.contains("AUTHENTICATIONFAILED"), "{line}");
+    }
+
+    #[test]
+    fn wrong_password_stays_authenticationfailed() {
+        let line = String::from_utf8(trc::AuthEvent::Failed.into_err().id("a1").serialize()).unwrap();
+        assert!(line.contains("[AUTHENTICATIONFAILED]"), "{line}");
     }
 }
