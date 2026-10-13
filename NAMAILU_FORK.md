@@ -1,6 +1,6 @@
-# Namailu fork of Stalwart 0.16.23
+# Namailu fork of Stalwart 0.16.26
 
-Six changes on top of upstream `v0.16.23`; everything else is untouched.
+Seven changes on top of upstream `v0.16.26`; everything else is untouched.
 
 | area | change |
 |---|---|
@@ -10,6 +10,18 @@ Six changes on top of upstream `v0.16.23`; everything else is untouched.
 | `crates/email/src/sieve/outbound_hook.rs`, `crates/email/src/sieve/ingest.rs` | mail sent by a user Sieve script (redirect, vacation, notify) asks the RCPT-stage MTA hook first (below) |
 | `crates/smtp/src/core/mod.rs`, `crates/smtp/src/inbound/{data,session}.rs`, `crates/smtp/src/inbound/hooks/message.rs` | the DATA-stage MTA hook receives the spam filter score as `serverHeaders` `X-Spam-Score` (below) |
 | `crates/email/src/message/ingest.rs`, `crates/jmap/src/email/{import,set}.rs`, `crates/imap/src/op/append.rs` | client ingest (JMAP `Email/import`, `Email/set`, IMAP `APPEND`) strips server-owned verdict headers (below) |
+| `crates/imap/src/op/authenticate.rs`, `crates/pop3/src/op/authenticate.rs` | an authentication backend error is answered as a temporary failure, not as a wrong password (below) |
+
+## Backend errors are not wrong passwords
+
+When the directory cannot decide (`auth.error`, e.g. the password verification endpoint
+answers 502 for a few seconds during a control-plane deploy), upstream IMAP answers
+`NO [AUTHENTICATIONFAILED]`, the same as a wrong password. iOS Mail then treats the stored
+password as invalid and stops using it until the user re-enters it (seen 10 Oct 2026: one
+account stayed offline for three days after a 2-second 502). The fork answers
+`NO [UNAVAILABLE]` (RFC 5530) on IMAP and `-ERR [SYS/TEMP]` (RFC 3206, `RESP-CODES` is
+advertised) on POP3; SMTP already answered `454 4.7.0`. The original reason stays in the
+log event. `auth.error` was never counted by the auth fail2ban, so nothing changes there.
 
 ## Client ingest cannot carry server verdicts
 
@@ -116,7 +128,7 @@ backends used by Namailu. Build it with:
 
 ```sh
 docker build -f Dockerfile.namailu \
-  -t namailu/stalwart:v0.16.23-unified-password .
+  -t namailu/stalwart:v0.16.26-unified-password .
 ```
 
 The fork remains licensed under the upstream AGPL-3.0-only option. The complete
@@ -124,6 +136,13 @@ corresponding source of the running modified version is published at
 <https://github.com/mailows/Stalwart-namailu>, branch `namailu-unified-password`
 (public). The primary development repository is `git.facilitygo.com/filip/Stalwart`
 (private since spam); the GitHub copy is pushed after every deployed change.
+
+## Rebase onto v0.16.26 (13 Oct 2026)
+
+- 26 fork commits applied onto `v0.16.26` without conflicts. Upstream changes worth knowing:
+  IMAP `LOGIN`/`AUTHENTICATE` with a wrong app password now gets a tagged `NO` (clients
+  waited for a timeout before), OIDC builds the account from `email` when `claimUsername`
+  is missing, DKIM, DNSBL and RocksDB fixes, patched hickory-dns fork with DNSSEC fixes.
 
 ## Rebase onto v0.16.23 (25 Sep 2026)
 
