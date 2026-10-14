@@ -127,6 +127,9 @@ pub struct Message {
     pub server_headers: Vec<(String, String)>,
     pub contents: String,
     pub size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "rawBase64")]
+    pub raw_base64: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
