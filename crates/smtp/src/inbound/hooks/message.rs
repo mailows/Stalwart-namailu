@@ -17,6 +17,7 @@ use crate::{
     queue::QueueId,
 };
 use ahash::AHashMap;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use common::{
     DAEMON_NAME,
     config::smtp::session::{MTAHook, Stage},
@@ -359,8 +360,18 @@ impl<T: SessionStream> Session<T> {
                         headers
                     })
                     .unwrap_or_default(),
-                contents: String::from_utf8_lossy(message.raw_body()).into_owned(),
+                // DATA is transported once, as exact bytes. Duplicating a
+                // lossy text copy could exceed the scanner's HTTP body limit.
+                contents: if stage == Stage::Data {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(message.raw_body()).into_owned()
+                },
                 size: message.raw_message().len(),
+                // `contents` is a legacy text field and is lossy for 8BITMIME.
+                // The scanner must inspect exactly the bytes that reach the queue.
+                raw_base64: (stage == Stage::Data)
+                    .then(|| STANDARD.encode(message.raw_message())),
             }),
         };
 
