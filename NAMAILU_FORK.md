@@ -1,6 +1,6 @@
 # Namailu fork of Stalwart 0.16.26
 
-Seven changes on top of upstream `v0.16.26`; everything else is untouched.
+Eight changes on top of upstream `v0.16.26`; everything else is untouched.
 
 | area | change |
 |---|---|
@@ -11,6 +11,7 @@ Seven changes on top of upstream `v0.16.26`; everything else is untouched.
 | `crates/smtp/src/core/mod.rs`, `crates/smtp/src/inbound/{data,session}.rs`, `crates/smtp/src/inbound/hooks/message.rs` | the DATA-stage MTA hook receives the spam filter score as `serverHeaders` `X-Spam-Score` (below) |
 | `crates/email/src/message/ingest.rs`, `crates/jmap/src/email/{import,set}.rs`, `crates/imap/src/op/append.rs` | client ingest (JMAP `Email/import`, `Email/set`, IMAP `APPEND`) strips server-owned verdict headers (below) |
 | `crates/imap/src/op/authenticate.rs`, `crates/pop3/src/op/authenticate.rs` | an authentication backend error is answered as a temporary failure, not as a wrong password (below) |
+| `crates/smtp/src/inbound/data.rs`, `crates/smtp/src/inbound/hooks/{message,mod}.rs` | the DATA-stage MTA hook runs last, on the exact bytes that will be queued; afterwards only its verdict headers may change (below) |
 
 ## Backend errors are not wrong passwords
 
@@ -53,6 +54,24 @@ script). Only `"action": "accept"` lets the copy out. Errors, timeouts (capped a
 10 s) and rejections drop it; the received message itself is never lost, because
 the existing fail-safe files it into the inbox when no other action kept it.
 Without an RCPT hook configured, behaviour is unchanged.
+
+## The DATA hook sees the exact queued bytes
+
+Upstream runs the DATA-stage MTA hook before milter changes and the trusted DATA
+Sieve script, sends the body as lossy UTF-8 text, and applies the hook's accept
+modifications through the generic milter rewriter, which re-serialises every
+header. A scanner could therefore approve bytes that a later filter replaced, and
+8BITMIME bodies were scanned in a different form than they were delivered.
+
+The fork applies milter changes and the DATA Sieve script first, then sends the
+hook the final message (server headers included) once, as `message.rawBase64`,
+with `contents` left empty and the final envelope. A DATA filter that adds or
+duplicates a recipient that did not pass RCPT — where quotas and gateway
+restrictions are charged — is answered `451 4.3.0`. From the hook's accept
+answer only `X-Namailu-Scan-Status` / `X-Namailu-Scan-Engine` additions and
+deletions of scanner-owned headers are applied, byte-preserving; any other
+modification, or a missing verdict, is `451 4.3.0` (fail closed). The deployed
+scanner must understand `rawBase64` on the DATA stage before this build runs.
 
 ## Spam score for the MTA hook
 
