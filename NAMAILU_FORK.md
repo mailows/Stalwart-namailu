@@ -105,7 +105,12 @@ Security properties:
 - password hashes, tokens, profiles, and sessions are never returned;
 - the existing OIDC Bearer and scoped AppPassword paths are unchanged;
 - the deployment additionally restricts the endpoint with an internal TLS
-  listener, source ACL, service bearer, rate limits, and bounded Argon2 work.
+  listener, source ACL, service bearer, rate limits, and bounded Argon2 work;
+- a verified HTTP Basic credential is cached for at most 60 seconds (upstream
+  caches it for the whole OAuth token lifetime). The password lives in the IdP,
+  so changing it does not bump the Stalwart account revision; the short cache
+  is what makes an old password stop working over CalDAV/CardDAV/JMAP within a
+  minute. IMAP/SMTP/POP3 verify on every login and are unaffected.
 
 ## JMAP session follows the requested host
 
