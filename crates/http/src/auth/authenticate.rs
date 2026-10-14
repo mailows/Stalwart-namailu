@@ -124,7 +124,16 @@ impl Authenticator for Server {
     }
 }
 
+/// Upper bound for caching a verified Basic credential. Passwords are owned by
+/// the external IdP, so a password change does not bump the account revision
+/// here; without this cap an old password kept working over HTTP (CalDAV,
+/// CardDAV, JMAP) for the whole OAuth token lifetime.
+const BASIC_AUTH_CACHE_TTL: Duration = Duration::from_secs(60);
+
 fn auth_cache_ttl(mechanism: &str, token: &str, max_ttl: Duration) -> Duration {
+    if mechanism.eq_ignore_ascii_case("basic") {
+        return max_ttl.min(BASIC_AUTH_CACHE_TTL);
+    }
     if !mechanism.eq_ignore_ascii_case("bearer") {
         return max_ttl;
     }
@@ -208,9 +217,20 @@ mod tests {
     }
 
     #[test]
-    fn opaque_bearer_and_basic_keep_configured_cache_ttl() {
+    fn opaque_bearer_keeps_configured_cache_ttl() {
         let configured = Duration::from_secs(900);
         assert_eq!(auth_cache_ttl("Bearer", "API_opaque", configured), configured);
-        assert_eq!(auth_cache_ttl("Basic", "opaque", configured), configured);
+    }
+
+    #[test]
+    fn basic_cache_is_capped_so_password_changes_apply_quickly() {
+        assert_eq!(
+            auth_cache_ttl("Basic", "opaque", Duration::from_secs(3600)),
+            BASIC_AUTH_CACHE_TTL
+        );
+        assert_eq!(
+            auth_cache_ttl("basic", "opaque", Duration::from_secs(10)),
+            Duration::from_secs(10)
+        );
     }
 }
