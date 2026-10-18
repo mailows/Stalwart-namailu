@@ -59,7 +59,7 @@ use utils::DomainPart;
 /// headers are copied byte-for-byte, and messages without the field are not
 /// allocated or rewritten.
 fn strip_submitted_feedback_id(message: &[u8]) -> Option<Vec<u8>> {
-    let mut cleaned = None;
+    let mut cleaned: Option<Vec<u8>> = None;
     let mut offset = 0;
     let mut skip = false;
 
