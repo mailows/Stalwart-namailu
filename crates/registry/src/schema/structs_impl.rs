@@ -7336,6 +7336,7 @@ impl Default for Dkim1Signature {
                 "Date".to_string(),
                 "Subject".to_string(),
                 "Message-ID".to_string(),
+                "Feedback-ID".to_string(),
             ]),
             private_key: Default::default(),
             report: true,

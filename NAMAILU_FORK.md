@@ -1,6 +1,6 @@
 # Namailu fork of Stalwart 0.16.26
 
-Eight changes on top of upstream `v0.16.26`; everything else is untouched.
+Nine changes on top of upstream `v0.16.26`; everything else is untouched.
 
 | area | change |
 |---|---|
@@ -12,6 +12,28 @@ Eight changes on top of upstream `v0.16.26`; everything else is untouched.
 | `crates/email/src/message/ingest.rs`, `crates/jmap/src/email/{import,set}.rs`, `crates/imap/src/op/append.rs` | client ingest (JMAP `Email/import`, `Email/set`, IMAP `APPEND`) strips server-owned verdict headers (below) |
 | `crates/imap/src/op/authenticate.rs`, `crates/pop3/src/op/authenticate.rs` | an authentication backend error is answered as a temporary failure, not as a wrong password (below) |
 | `crates/smtp/src/inbound/data.rs`, `crates/smtp/src/inbound/hooks/{message,mod}.rs` | the DATA-stage MTA hook runs last, on the exact bytes that will be queued; afterwards only its verdict headers may change (below) |
+| `crates/smtp/src/inbound/{data,dkim}.rs`, `crates/common/src/{cache/principals,config/smtp/auth}.rs`, `crates/registry/src/schema/structs_impl.rs` | authenticated mail gets a server-owned, DKIM-signed Google Feedback-ID (below) |
+
+## Google Feedback Loop header
+
+For authenticated SMTP submission (including JMAP EmailSubmission's local SMTP
+session), the fork removes any client-supplied top-level `Feedback-ID`, including
+duplicates and folded lines, and adds exactly one server-owned value before the
+DATA-stage scanner and DKIM signing. Its format is
+`t<tenant-id>:a<account-id>:mail:namailu`; the two IDs are Stalwart registry IDs
+in hexadecimal, and a missing tenant is `t0`. The value is stable across
+messages from one account but never derived from message content or recipients.
+Unauthenticated inbound mail is not rewritten by this rule.
+
+`Feedback-ID` is included in the default DKIM1 signed header set for new keys.
+The authenticated signer also appends it at runtime to the persisted header
+set of older keys, so existing domains do not require key rotation or a
+registry migration. Non-authenticated messages, including Sieve redirects,
+use the same DKIM key without signing a Feedback-ID copied from the original
+sender. The DATA hook receives the same normalized header that will be queued
+and signed. [Google's Feedback Loop](https://support.google.com/mail/answer/6254652?hl=en)
+only publishes aggregate data for sufficiently large `@gmail.com` traffic;
+it does not return individual complaints.
 
 ## Backend errors are not wrong passwords
 
