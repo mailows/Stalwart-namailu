@@ -49,6 +49,9 @@ async fn sign_and_seal() {
         })
         .await;
     admin.create_dkim_signatures(domain_id).await;
+    admin
+        .create_user_account("john@example.com", "test password", "John", &[], vec![])
+        .await;
     admin.mta_no_auth().await;
     admin.mta_add_all_headers().await;
     admin
@@ -147,6 +150,58 @@ async fn sign_and_seal() {
         .assert_contains(
             "DKIM-Signature: v=1; a=rsa-sha256; s=rsa; d=example.com; c=simple/relaxed;",
         );
+
+    // A Sieve/relay-style unauthenticated message may retain the original
+    // sender's header, but our DKIM signature must not vouch for that value.
+    session
+        .send_message(
+            "bill@foobar.org",
+            &["jdoe@example.com"],
+            "From: bill@foobar.org\r\nTo: jdoe@example.com\r\nSubject: forwarded\r\nFeedback-ID: forged:tenant:mail:namailu\r\n\r\nbody",
+            "250",
+        )
+        .await;
+    let forwarded = test.expect_message().await.read_message(&test).await;
+    assert!(forwarded.contains("Feedback-ID: forged:tenant:mail:namailu"));
+    let unfolded = forwarded.replace("\r\n\t", "").replace("\r\n ", "");
+    let signatures = unfolded
+        .lines()
+        .filter(|line| line.starts_with("DKIM-Signature:"))
+        .collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 2);
+    assert!(signatures.iter().all(|line| !line.to_ascii_lowercase().contains("feedback-id")));
+
+    // Authenticated SMTP, including JMAP EmailSubmission's local SMTP path,
+    // must replace a submitted identifier and sign the server-owned value.
+    let mut authenticated = test.new_mta_session();
+    authenticated.data.remote_ip_str = "10.0.0.2".into();
+    authenticated.eval_session_params().await;
+    authenticated.stream.tls = true;
+    authenticated.ehlo("mx.example.com").await;
+    authenticated
+        .auth_plain("john@example.com", "test password", "235 2.7.0")
+        .await;
+    let account_id = authenticated.data.authenticated_as.as_ref().unwrap().account_id;
+    authenticated
+        .send_message(
+            "john@example.com",
+            &["jdoe@example.com"],
+            "From: john@example.com\r\nTo: jdoe@example.com\r\nSubject: FBL test\r\nFeedback-ID: forged:tenant:mail:namailu\r\n\r\nbody",
+            "250",
+        )
+        .await;
+    let delivered = test.expect_message().await.read_message(&test).await;
+    assert_eq!(delivered.matches("Feedback-ID:").count(), 1);
+    assert!(delivered.contains(&format!(
+        "Feedback-ID: t0:a{account_id:x}:mail:namailu\r\n"
+    )));
+    let unfolded = delivered.replace("\r\n\t", "").replace("\r\n ", "");
+    let signatures = unfolded
+        .lines()
+        .filter(|line| line.starts_with("DKIM-Signature:"))
+        .collect::<Vec<_>>();
+    assert_eq!(signatures.len(), 2);
+    assert!(signatures.iter().all(|line| line.to_ascii_lowercase().contains("feedback-id")));
 
     // Test ARC verify
     session

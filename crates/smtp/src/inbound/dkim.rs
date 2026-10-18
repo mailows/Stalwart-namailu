@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::queue::{MessageWrapper, Metadata, spool::QueueParams};
+use crate::queue::{FROM_AUTHENTICATED, MessageWrapper, Metadata, spool::QueueParams};
 use common::{
     Server,
     config::smtp::auth::{Dkim1Signer, DkimSigners},
@@ -45,7 +45,12 @@ impl DkimSign for Server {
 
         // DKIM1 signing
         let mut headers = Vec::with_capacity(64);
-        for signer in &signers.dkim1 {
+        let dkim1_signers = if message.message.flags & FROM_AUTHENTICATED != 0 {
+            &signers.dkim1_authenticated
+        } else {
+            &signers.dkim1
+        };
+        for signer in dkim1_signers {
             let result = match (signer, params.raw_headers) {
                 (Dkim1Signer::RsaSha256(signer), None) => signer.sign(raw_message),
                 (Dkim1Signer::Ed25519Sha256(signer), None) => signer.sign(raw_message),

@@ -80,6 +80,7 @@ pub enum Dkim1Signer {
 #[derive(Default)]
 pub struct DkimSigners {
     pub dkim1: Vec<Dkim1Signer>,
+    pub dkim1_authenticated: Vec<Dkim1Signer>,
     pub dkim2: Option<Dkim2Signer<Dkim2Done>>,
 }
 
@@ -157,10 +158,20 @@ impl DkimSigners {
                             .reason(err)
                             .details("Failed to build ED25519 key")
                     })?;
+                let authenticated_key =
+                    Ed25519Key::from_pkcs8_maybe_unchecked_der(&private_key).map_err(|err| {
+                        trc::DkimEvent::BuildError
+                            .reason(err)
+                            .details("Failed to build ED25519 key")
+                    })?;
 
                 self.dkim1
                     .push(Dkim1Signer::Ed25519Sha256(build_dkim1_signer(
-                        domain, signature, key,
+                        domain.clone(), signature.clone(), key, false,
+                    )));
+                self.dkim1_authenticated
+                    .push(Dkim1Signer::Ed25519Sha256(build_dkim1_signer(
+                        domain, signature, authenticated_key, true,
                     )));
             }
             DkimSignature::Dkim1RsaSha256(signature) => {
@@ -170,10 +181,15 @@ impl DkimSigners {
                     .await
                     .map_err(|err| trc::DkimEvent::BuildError.reason(err))?;
                 let key = rsa_key_parse(private_key.as_bytes())?;
+                let authenticated_key = rsa_key_parse(private_key.as_bytes())?;
 
                 self.dkim1.push(Dkim1Signer::RsaSha256(build_dkim1_signer(
-                    domain, signature, key,
+                    domain.clone(), signature.clone(), key, false,
                 )));
+                self.dkim1_authenticated
+                    .push(Dkim1Signer::RsaSha256(build_dkim1_signer(
+                        domain, signature, authenticated_key, true,
+                    )));
             }
             DkimSignature::Dkim2Ed25519Sha256(signature) => {
                 let private_key = signature
@@ -282,15 +298,29 @@ pub fn simple_pem_parse(contents: &str) -> Option<Vec<u8>> {
     base64_decode(&base64)
 }
 
+fn feedback_id_headers(mut headers: Map<String>, authenticated: bool) -> Map<String> {
+    // Never sign a Feedback-ID copied from an unauthenticated message (e.g. a
+    // Sieve redirect). For authenticated submission, cover the server-owned
+    // header even when an old key has a persisted header list without it.
+    headers
+        .inner_mut()
+        .retain(|header| !header.eq_ignore_ascii_case("Feedback-ID"));
+    if authenticated {
+        headers.push("Feedback-ID".to_string());
+    }
+    headers
+}
+
 fn build_dkim1_signer<T: SigningKey>(
     domain: String,
     signature: Dkim1Signature,
     key: T,
+    authenticated: bool,
 ) -> mail_auth::dkim::DkimSigner<T, Done> {
     let mut signer = mail_auth::dkim::DkimSigner::from_key(key)
         .domain(domain)
         .selector(signature.selector)
-        .headers(signature.headers)
+        .headers(feedback_id_headers(signature.headers, authenticated))
         .reporting(signature.report);
 
     match signature.canonicalization {
@@ -375,6 +405,36 @@ impl CacheItemWeight for DkimSigners {
     fn weight(&self) -> u64 {
         (std::mem::size_of::<Self>()
             + self.dkim1.len() * std::mem::size_of::<Dkim1Signer>()
+            + self.dkim1_authenticated.len() * std::mem::size_of::<Dkim1Signer>()
             + std::mem::size_of::<Dkim2Signer<Dkim2Done>>()) as u64
+    }
+}
+
+#[cfg(test)]
+mod feedback_id_tests {
+    use super::{Map, feedback_id_headers};
+
+    #[test]
+    fn adds_header_to_legacy_signature_without_changing_existing_order() {
+        let headers = Map::new(vec!["From".to_string(), "Subject".to_string()]);
+        assert_eq!(
+            feedback_id_headers(headers, true).into_inner(),
+            vec!["From", "Subject", "Feedback-ID"]
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_header_with_different_case() {
+        let headers = Map::new(vec!["From".to_string(), "feedback-id".to_string()]);
+        assert_eq!(
+            feedback_id_headers(headers, true).into_inner(),
+            vec!["From", "Feedback-ID"]
+        );
+    }
+
+    #[test]
+    fn does_not_sign_untrusted_feedback_id() {
+        let headers = Map::new(vec!["From".to_string(), "Feedback-ID".to_string()]);
+        assert_eq!(feedback_id_headers(headers, false).into_inner(), vec!["From"]);
     }
 }

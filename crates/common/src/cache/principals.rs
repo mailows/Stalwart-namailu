@@ -916,6 +916,7 @@ impl Server {
                 let domain_name = &domain.names[0];
                 let mut signers = DkimSigners {
                     dkim1: Vec::with_capacity(ids.len()),
+                    dkim1_authenticated: Vec::with_capacity(ids.len()),
                     dkim2: None,
                 };
                 for id in ids {

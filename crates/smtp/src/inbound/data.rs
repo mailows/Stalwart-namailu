@@ -54,6 +54,105 @@ use std::{
 use trc::{SmtpEvent, SpamEvent};
 use utils::DomainPart;
 
+/// Remove every top-level Feedback-ID field (including folded continuation
+/// lines) from an authenticated SMTP submission. The body and all other
+/// headers are copied byte-for-byte, and messages without the field are not
+/// allocated or rewritten.
+fn strip_submitted_feedback_id(message: &[u8]) -> Option<Vec<u8>> {
+    let mut cleaned = None;
+    let mut offset = 0;
+    let mut skip = false;
+
+    while offset < message.len() {
+        let end = message[offset..]
+            .iter()
+            .position(|&byte| byte == b'\r' || byte == b'\n')
+            .map_or(message.len(), |pos| {
+                let end = offset + pos + 1;
+                if message[end - 1] == b'\r' && message.get(end) == Some(&b'\n') {
+                    end + 1
+                } else {
+                    end
+                }
+            });
+        let line = &message[offset..end];
+        if line == b"\r\n" || line == b"\n" || line == b"\r" {
+            if let Some(cleaned) = &mut cleaned {
+                cleaned.extend_from_slice(&message[offset..]);
+            }
+            break;
+        }
+
+        if !matches!(line.first(), Some(b' ' | b'\t')) {
+            skip = line
+                .iter()
+                .position(|&byte| byte == b':')
+                .is_some_and(|colon| {
+                    line[..colon]
+                        .trim_ascii_end()
+                        .eq_ignore_ascii_case(b"Feedback-ID")
+                });
+            if skip && cleaned.is_none() {
+                cleaned = Some(message[..offset].to_vec());
+            }
+        }
+        if !skip {
+            if let Some(cleaned) = &mut cleaned {
+                cleaned.extend_from_slice(line);
+            }
+        }
+        offset = end;
+    }
+
+    cleaned
+}
+
+fn feedback_id_header(tenant_id: Option<u32>, account_id: u32) -> String {
+    format!(
+        "Feedback-ID: t{:x}:a{account_id:x}:mail:namailu\r\n",
+        tenant_id.unwrap_or_default()
+    )
+}
+
+#[cfg(test)]
+mod feedback_id_tests {
+    use super::{feedback_id_header, strip_submitted_feedback_id};
+
+    #[test]
+    fn removes_all_client_fields_and_folded_lines_without_touching_body() {
+        let input = b"From: a@example.test\r\nFeedback-ID: forged:tenant:mail:namailu\r\n\tcontinued\r\nSubject: test\r\nfEeDbAcK-Id : another:forgery\r\nTo: b@example.test\r\n\r\nFeedback-ID: body text\r\n";
+        let expected = b"From: a@example.test\r\nSubject: test\r\nTo: b@example.test\r\n\r\nFeedback-ID: body text\r\n";
+        assert_eq!(strip_submitted_feedback_id(input).as_deref(), Some(&expected[..]));
+    }
+
+    #[test]
+    fn leaves_unrelated_message_unchanged() {
+        let input = b"From: a@example.test\nSubject: test\n\nbody\n";
+        assert!(strip_submitted_feedback_id(input).is_none());
+    }
+
+    #[test]
+    fn removes_bare_cr_header_and_preserves_body() {
+        let input = b"From: a@example.test\rFeedback-ID: forged\r\rcontent\r";
+        assert_eq!(
+            strip_submitted_feedback_id(input).as_deref(),
+            Some(&b"From: a@example.test\r\rcontent\r"[..])
+        );
+    }
+
+    #[test]
+    fn generated_id_is_stable_and_separates_tenant_and_account() {
+        assert_eq!(
+            feedback_id_header(Some(31), 255),
+            "Feedback-ID: t1f:aff:mail:namailu\r\n"
+        );
+        assert_eq!(
+            feedback_id_header(None, 255),
+            "Feedback-ID: t0:aff:mail:namailu\r\n"
+        );
+    }
+}
+
 impl<T: SessionStream> Session<T> {
     pub async fn queue_message(&mut self) -> Cow<'static, [u8]> {
         // Parse message
@@ -770,6 +869,22 @@ impl<T: SessionStream> Session<T> {
                     }
                 }
             }
+        }
+
+        // Normalize the submitted header before the DATA hook. The scanner
+        // must see exactly the Feedback-ID bytes that DKIM will later sign.
+        if let Some(account) = &self.data.authenticated_as {
+            if let Some(stripped) = strip_submitted_feedback_id(
+                edited_message.as_deref().unwrap_or(raw_message.as_slice()),
+            ) {
+                edited_message = Some(stripped);
+            }
+            if let Some(stripped) = strip_submitted_feedback_id(&headers) {
+                headers = stripped;
+            }
+            headers.extend_from_slice(
+                feedback_id_header(account.account.id_tenant, account.account_id).as_bytes(),
+            );
         }
 
         let final_recipients = self
