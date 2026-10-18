@@ -20,11 +20,15 @@ For authenticated SMTP submission (including JMAP EmailSubmission's local SMTP
 session), the fork removes any client-supplied top-level `Feedback-ID`, including
 duplicates and folded lines, and adds exactly one server-owned value before the
 DATA-stage scanner and DKIM signing. Its format is
-`<tenant-tag>:<account-tag>:mail:namailu`; each tag is the first 12 hex digits of
-a keyed BLAKE3 hash of the Stalwart registry ID (missing tenant = 0), keyed from
+`<org-tag>:<account-tag>:mail:namailu`; each tag is the first 12 hex digits of
+a keyed BLAKE3 hash of a Stalwart registry ID, keyed from
 `STALWART_FEEDBACK_ID_KEY` (at least 32 characters). Recipients therefore never
 see internal sequential IDs, while the value stays stable across messages from
-one account and is never derived from message content or recipients. Without the
+one account and is never derived from message content or recipients. The org tag
+is the Stalwart tenant when there is one; Namailu does not use tenants, so it falls
+back to the domain of the account's primary address (a customer's own domain is one
+organisation; accounts on the shared domains share it and differ by account tag).
+Without the
 key no Feedback-ID is added at all; client-supplied values are still removed.
 Unauthenticated inbound mail is not rewritten by this rule.
 

@@ -129,17 +129,29 @@ fn feedback_id_tag(key: &[u8; 32], kind: u8, id: u32) -> String {
     blake3::keyed_hash(key, &input).to_hex()[..12].to_string()
 }
 
-fn feedback_id_header(key: &[u8; 32], tenant_id: Option<u32>, account_id: u32) -> String {
+/// The first Feedback-ID field identifies the sending organisation. Namailu does
+/// not use Stalwart tenants, so without a tenant the domain of the account's
+/// primary address stands in for it: a customer's own domain is one organisation,
+/// and the shared domains group their (individually tagged) accounts together.
+fn feedback_id_org(tenant_id: Option<u32>, primary_domain_id: Option<u32>) -> (u8, u32) {
+    match (tenant_id, primary_domain_id) {
+        (Some(tenant_id), _) => (b't', tenant_id),
+        (None, Some(domain_id)) => (b'd', domain_id),
+        (None, None) => (b't', 0),
+    }
+}
+
+fn feedback_id_header(key: &[u8; 32], org: (u8, u32), account_id: u32) -> String {
     format!(
         "Feedback-ID: {}:{}:mail:namailu\r\n",
-        feedback_id_tag(key, b't', tenant_id.unwrap_or_default()),
+        feedback_id_tag(key, org.0, org.1),
         feedback_id_tag(key, b'a', account_id)
     )
 }
 
 #[cfg(test)]
 mod feedback_id_tests {
-    use super::{feedback_id_header, feedback_id_key, strip_submitted_feedback_id};
+    use super::{feedback_id_header, feedback_id_key, feedback_id_org, strip_submitted_feedback_id};
 
     #[test]
     fn removes_all_client_fields_and_folded_lines_without_touching_body() {
@@ -166,17 +178,30 @@ mod feedback_id_tests {
     #[test]
     fn generated_id_is_stable_opaque_and_separates_tenant_and_account() {
         let key = feedback_id_key(Some("0123456789abcdef0123456789abcdef")).unwrap();
-        let header = feedback_id_header(&key, Some(31), 255);
-        assert_eq!(header, feedback_id_header(&key, Some(31), 255));
+        let header = feedback_id_header(&key, (b't', 31), 255);
+        assert_eq!(header, feedback_id_header(&key, (b't', 31), 255));
         assert!(header.starts_with("Feedback-ID: ") && header.ends_with(":mail:namailu\r\n"));
         let fields: Vec<&str> = header["Feedback-ID: ".len()..].trim_end().split(':').collect();
         assert_eq!(fields.len(), 4);
         assert!(fields[..2].iter().all(|f| f.len() == 12));
         assert_ne!(fields[0], fields[1], "tenant and account tags must differ");
-        assert_ne!(header, feedback_id_header(&key, Some(31), 256));
-        assert_ne!(header, feedback_id_header(&key, Some(32), 255));
+        assert_ne!(header, feedback_id_header(&key, (b't', 31), 256));
+        assert_ne!(header, feedback_id_header(&key, (b't', 32), 255));
         let other = feedback_id_key(Some("another-secret-another-secret-123")).unwrap();
-        assert_ne!(header, feedback_id_header(&other, Some(31), 255));
+        assert_ne!(header, feedback_id_header(&other, (b't', 31), 255));
+    }
+
+    #[test]
+    fn organisation_falls_back_to_the_primary_domain() {
+        assert_eq!(feedback_id_org(Some(7), Some(3)), (b't', 7));
+        assert_eq!(feedback_id_org(None, Some(3)), (b'd', 3));
+        assert_eq!(feedback_id_org(None, None), (b't', 0));
+        let key = feedback_id_key(Some("0123456789abcdef0123456789abcdef")).unwrap();
+        // Tenant 3 and domain 3 are different organisations.
+        assert_ne!(
+            feedback_id_header(&key, (b't', 3), 1),
+            feedback_id_header(&key, (b'd', 3), 1)
+        );
     }
 
     #[test]
@@ -922,8 +947,15 @@ impl<T: SessionStream> Session<T> {
                 .as_ref()
             {
                 headers.extend_from_slice(
-                    feedback_id_header(key, account.account.id_tenant, account.account_id)
-                        .as_bytes(),
+                    feedback_id_header(
+                        key,
+                        feedback_id_org(
+                            account.account.id_tenant,
+                            account.account.addresses.first().map(|a| a.domain_id),
+                        ),
+                        account.account_id,
+                    )
+                    .as_bytes(),
                 );
             }
         }
