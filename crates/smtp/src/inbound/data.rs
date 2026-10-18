@@ -107,16 +107,39 @@ fn strip_submitted_feedback_id(message: &[u8]) -> Option<Vec<u8>> {
     cleaned
 }
 
-fn feedback_id_header(tenant_id: Option<u32>, account_id: u32) -> String {
+/// Environment variable with the secret for opaque Feedback-ID tags. The
+/// header must stay stable per tenant/account (Google aggregates by it), but
+/// recipients must not learn internal sequential ids. Without a key (or with a
+/// key shorter than 32 bytes) no Feedback-ID is added; client values are still
+/// stripped, so nothing unsigned or forged ever leaves.
+const FEEDBACK_ID_KEY_ENV: &str = "STALWART_FEEDBACK_ID_KEY";
+const FEEDBACK_ID_KDF_CONTEXT: &str = "namailu 2026-10-18 Feedback-ID tags v1";
+
+fn feedback_id_key(secret: Option<&str>) -> Option<[u8; 32]> {
+    secret
+        .map(str::trim)
+        .filter(|secret| secret.len() >= 32)
+        .map(|secret| blake3::derive_key(FEEDBACK_ID_KDF_CONTEXT, secret.as_bytes()))
+}
+
+fn feedback_id_tag(key: &[u8; 32], kind: u8, id: u32) -> String {
+    let mut input = [0u8; 5];
+    input[0] = kind;
+    input[1..].copy_from_slice(&id.to_be_bytes());
+    blake3::keyed_hash(key, &input).to_hex()[..12].to_string()
+}
+
+fn feedback_id_header(key: &[u8; 32], tenant_id: Option<u32>, account_id: u32) -> String {
     format!(
-        "Feedback-ID: t{:x}:a{account_id:x}:mail:namailu\r\n",
-        tenant_id.unwrap_or_default()
+        "Feedback-ID: {}:{}:mail:namailu\r\n",
+        feedback_id_tag(key, b't', tenant_id.unwrap_or_default()),
+        feedback_id_tag(key, b'a', account_id)
     )
 }
 
 #[cfg(test)]
 mod feedback_id_tests {
-    use super::{feedback_id_header, strip_submitted_feedback_id};
+    use super::{feedback_id_header, feedback_id_key, strip_submitted_feedback_id};
 
     #[test]
     fn removes_all_client_fields_and_folded_lines_without_touching_body() {
@@ -141,15 +164,26 @@ mod feedback_id_tests {
     }
 
     #[test]
-    fn generated_id_is_stable_and_separates_tenant_and_account() {
-        assert_eq!(
-            feedback_id_header(Some(31), 255),
-            "Feedback-ID: t1f:aff:mail:namailu\r\n"
-        );
-        assert_eq!(
-            feedback_id_header(None, 255),
-            "Feedback-ID: t0:aff:mail:namailu\r\n"
-        );
+    fn generated_id_is_stable_opaque_and_separates_tenant_and_account() {
+        let key = feedback_id_key(Some("0123456789abcdef0123456789abcdef")).unwrap();
+        let header = feedback_id_header(&key, Some(31), 255);
+        assert_eq!(header, feedback_id_header(&key, Some(31), 255));
+        assert!(header.starts_with("Feedback-ID: ") && header.ends_with(":mail:namailu\r\n"));
+        let fields: Vec<&str> = header["Feedback-ID: ".len()..].trim_end().split(':').collect();
+        assert_eq!(fields.len(), 4);
+        assert!(fields[..2].iter().all(|f| f.len() == 12));
+        assert_ne!(fields[0], fields[1], "tenant and account tags must differ");
+        assert_ne!(header, feedback_id_header(&key, Some(31), 256));
+        assert_ne!(header, feedback_id_header(&key, Some(32), 255));
+        let other = feedback_id_key(Some("another-secret-another-secret-123")).unwrap();
+        assert_ne!(header, feedback_id_header(&other, Some(31), 255));
+    }
+
+    #[test]
+    fn short_or_missing_key_disables_the_header() {
+        assert!(feedback_id_key(None).is_none());
+        assert!(feedback_id_key(Some("too-short")).is_none());
+        assert!(feedback_id_key(Some("   ")).is_none());
     }
 }
 
@@ -882,9 +916,16 @@ impl<T: SessionStream> Session<T> {
             if let Some(stripped) = strip_submitted_feedback_id(&headers) {
                 headers = stripped;
             }
-            headers.extend_from_slice(
-                feedback_id_header(account.account.id_tenant, account.account_id).as_bytes(),
-            );
+            // Read per message (cheap: one env lookup and one BLAKE3 key derivation),
+            // so the integration test can set the key without racing a process-wide cache.
+            if let Some(key) = feedback_id_key(std::env::var(FEEDBACK_ID_KEY_ENV).ok().as_deref())
+                .as_ref()
+            {
+                headers.extend_from_slice(
+                    feedback_id_header(key, account.account.id_tenant, account.account_id)
+                        .as_bytes(),
+                );
+            }
         }
 
         let final_recipients = self

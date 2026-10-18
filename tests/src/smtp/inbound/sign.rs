@@ -181,7 +181,8 @@ async fn sign_and_seal() {
     authenticated
         .auth_plain("john@example.com", "test password", "235 2.7.0")
         .await;
-    let account_id = authenticated.data.authenticated_as.as_ref().unwrap().account_id;
+    // SAFETY: set before the authenticated DATA below; only this test reads the variable.
+    unsafe { std::env::set_var("STALWART_FEEDBACK_ID_KEY", "integration-test-feedback-id-key-0001") };
     authenticated
         .send_message(
             "john@example.com",
@@ -192,9 +193,18 @@ async fn sign_and_seal() {
         .await;
     let delivered = test.expect_message().await.read_message(&test).await;
     assert_eq!(delivered.matches("Feedback-ID:").count(), 1);
-    assert!(delivered.contains(&format!(
-        "Feedback-ID: t0:a{account_id:x}:mail:namailu\r\n"
-    )));
+    assert!(!delivered.contains("forged:tenant"));
+    let feedback_id = delivered
+        .lines()
+        .find_map(|line| line.strip_prefix("Feedback-ID: "))
+        .unwrap();
+    // Opaque keyed tags, never the internal sequential ids.
+    let fields = feedback_id.split(':').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 4, "{feedback_id}");
+    assert!(fields[..2]
+        .iter()
+        .all(|f| f.len() == 12 && f.bytes().all(|b| b.is_ascii_hexdigit())));
+    assert_eq!(&fields[2..], ["mail", "namailu"]);
     let unfolded = delivered.replace("\r\n\t", "").replace("\r\n ", "");
     let signatures = unfolded
         .lines()
