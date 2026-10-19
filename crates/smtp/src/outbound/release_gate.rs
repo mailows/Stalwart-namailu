@@ -77,28 +77,29 @@ impl MessageWrapper {
             return;
         }
 
-        let login = self.message.metadata.iter().find_map(|metadata| match metadata {
-            Metadata::ReleaseAccount { value, .. } => {
-                std::str::from_utf8(value).ok().map(str::to_string)
-            }
-            _ => None,
-        });
+        let account = submitting_account(&self.message.metadata);
 
         // The hook counts messages in its hourly window on the first recipient of a
         // submission, so number the recipients released in this pass.
         let mut released: Vec<String> = Vec::with_capacity(due.len());
         for idx in due {
             let address = self.message.recipients[idx].address().to_string();
-            let check = match &login {
-                Some(login) if !login.is_empty() => {
+            let check = match &account {
+                Some((login, account_id, queued_at_us)) => {
                     let mut envelope_to = released.clone();
                     envelope_to.push(address.clone());
-                    release_check(server, login, &self.message.return_path, &envelope_to)
-                        .await
+                    release_check(
+                        server, login, *account_id, *queued_at_us, self.queue_id,
+                        &self.message.return_path, &envelope_to,
+                    ).await
                 }
-                // A held message always carries its login; without it nobody can be
-                // charged, so it must not leave.
-                _ => ReleaseCheck::Denied("Scheduled message has no submitting account.".into()),
+                // Older or malformed held entries have no complete binding.
+                // Keep them for operator review; never inherit a recycled
+                // address and never bounce merely because of this upgrade.
+                _ => ReleaseCheck::Wait(
+                        "Scheduled message predates account binding; operator review required."
+                            .into(),
+                    ),
             };
             match check {
                 ReleaseCheck::Allowed => {
@@ -163,9 +164,27 @@ impl MessageWrapper {
     }
 }
 
+/// Bind to the submitting principal and submission time. A new DB mailbox can
+/// adopt an orphaned principal at the same address, so the policy checks both.
+/// Old queue entries lack a complete binding and must not inherit the new owner.
+fn submitting_account(metadata: &[Metadata]) -> Option<(String, u64, u64)> {
+    metadata.iter().find_map(|item| match item {
+        Metadata::ReleaseAccount { value, id } if *id > 0 => {
+            let (login, queued_at_us) = std::str::from_utf8(value).ok()?.split_once('\0')?;
+            let queued_at_us = queued_at_us.parse::<u64>().ok()?;
+            (!login.is_empty() && queued_at_us > 0)
+                .then_some((login.to_string(), *id - 1, queued_at_us))
+        }
+        _ => None,
+    })
+}
+
 async fn release_check(
     server: &Server,
     login: &str,
+    account_id: u64,
+    queued_at_us: u64,
+    queue_id: u64,
     return_path: &str,
     envelope_to: &[String],
 ) -> ReleaseCheck {
@@ -185,6 +204,9 @@ async fn release_check(
             "stage": "rcpt",
             "sasl": { "login": login },
             "futureRelease": "release",
+            "releaseAccountId": account_id,
+            "releaseQueuedAtUs": queued_at_us,
+            "releaseQueueId": queue_id,
         },
         "envelope": {
             "from": { "address": return_path },
@@ -207,7 +229,7 @@ async fn release_check(
             match response.bytes_with_limit(hook.max_response_size).await {
                 Ok(Some(bytes)) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                     Ok(value) => release_verdict(&value),
-                    Err(_) => ReleaseCheck::Denied("Invalid sending policy response.".into()),
+                    Err(_) => ReleaseCheck::Wait("Invalid sending policy response.".into()),
                 },
                 _ => ReleaseCheck::Wait("Sending policy unavailable.".into()),
             }
@@ -239,15 +261,31 @@ fn release_verdict(value: &serde_json::Value) -> ReleaseCheck {
         {
             ReleaseCheck::Wait(reason.unwrap_or_else(|| "Sending limit reached.".into()))
         }
-        _ => ReleaseCheck::Denied(
+        Some("reject") => ReleaseCheck::Denied(
             reason.unwrap_or_else(|| "Scheduled message refused by sending policy.".into()),
         ),
+        _ => ReleaseCheck::Wait("Invalid sending policy response.".into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ReleaseCheck, release_verdict};
+    use super::{ReleaseCheck, release_verdict, submitting_account};
+    use crate::queue::Metadata;
+
+    #[test]
+    fn released_message_requires_immutable_account_id() {
+        let entry = |id| Metadata::ReleaseAccount {
+            value: format!("person@example.test\0{}", 1_790_000_000_000_000_u64)
+                .into_bytes().into_boxed_slice(), id,
+        };
+        assert_eq!(submitting_account(&[entry(0)]), None);
+        assert_eq!(submitting_account(&[entry(43)]),
+                   Some(("person@example.test".into(), 42, 1790000000000000)));
+        assert_eq!(submitting_account(&[Metadata::ReleaseAccount {
+            value: b"person@example.test".to_vec().into_boxed_slice(), id: 43,
+        }]), None);
+    }
 
     #[test]
     fn release_verdicts() {
@@ -271,9 +309,9 @@ mod tests {
         );
         assert!(matches!(
             release_verdict(&serde_json::json!({"action": "quarantine"})),
-            ReleaseCheck::Denied(_)
+            ReleaseCheck::Wait(_)
         ));
-        assert!(matches!(release_verdict(&serde_json::json!({})), ReleaseCheck::Denied(_)));
+        assert!(matches!(release_verdict(&serde_json::json!({})), ReleaseCheck::Wait(_)));
     }
 
     #[test]

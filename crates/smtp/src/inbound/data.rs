@@ -1106,11 +1106,17 @@ impl<T: SessionStream> Session<T> {
             // Fork (namailu): remember who submitted a held message; the release
             // gate charges this account's quota when the message leaves the queue.
             if self.data.future_release != 0
-                && let Some(login) = self.authenticated_as()
+                && let Some(account) = self.data.authenticated_as.as_ref()
             {
                 metadata.push(Metadata::ReleaseAccount {
-                    value: login.as_bytes().into(),
-                    id: 0,
+                    // Bind the queued mail to this mailbox generation as well as
+                    // the Stalwart principal. A purged principal may be adopted
+                    // by a newly created control-plane mailbox at the same address.
+                    value: format!("{}\0{}", account.name(),
+                        self.data.future_release_started_at_us).into_bytes().into(),
+                    // +1 leaves zero as a fail-closed marker for messages queued
+                    // by the older fork, which stored only the reusable address.
+                    id: u64::from(account.account_id()) + 1,
                 });
             }
             // Queue message
