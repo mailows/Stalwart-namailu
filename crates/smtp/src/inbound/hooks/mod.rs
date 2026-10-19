@@ -28,6 +28,11 @@ pub struct Context {
     /// Server-verified DKIM identity: the single header From with an aligned pass.
     #[serde(rename = "dkimVerifiedFrom", skip_serializing_if = "Option::is_none", default)]
     pub dkim_verified_from: Option<String>,
+    /// Fork (namailu): `"hold"` while a FUTURERELEASE message is being submitted
+    /// (the quota is charged at release, not now); the release gate sends
+    /// `"release"` from the queue. Absent for ordinary mail.
+    #[serde(rename = "futureRelease", skip_serializing_if = "Option::is_none", default)]
+    pub future_release: Option<String>,
     pub stage: Stage,
     pub client: Client,
     #[serde(skip_serializing_if = "Option::is_none")]

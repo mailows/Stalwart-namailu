@@ -492,7 +492,7 @@ impl MessageWrapper {
                         self.message.size as i64,
                     );
                 }
-                Metadata::Headers { .. } => {}
+                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. } => {}
             }
         }
 
@@ -826,7 +826,7 @@ impl MessageWrapper {
                         -(self.message.size as i64),
                     );
                 }
-                Metadata::Headers { .. } => {}
+                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. } => {}
             }
         }
 
@@ -989,7 +989,7 @@ impl MessageWrapper {
                         -(self.message.size as i64),
                     );
                 }
-                Metadata::Headers { .. } => {}
+                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. } => {}
             }
         }
 

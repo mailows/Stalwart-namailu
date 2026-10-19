@@ -24,6 +24,7 @@ pub mod error;
 pub mod local;
 pub mod lookup;
 pub mod mta_sts;
+pub mod release_gate;
 pub mod scan_pending;
 pub mod session;
 

@@ -84,6 +84,35 @@ script). Only `"action": "accept"` lets the copy out. Errors, timeouts (capped a
 the existing fail-safe files it into the inbox when no other action kept it.
 Without an RCPT hook configured, behaviour is unchanged.
 
+## Delayed send charges the quota at release
+
+A deployment that charges per-account sending quota in its RCPT hook charges a
+held message (`HOLDFOR`/`HOLDUNTIL`, JMAP `EmailSubmission` with a send time) when
+it is submitted, although it leaves days later. A client can then stockpile several
+days of quota into one release window, and a message held before the account is
+suspended still goes out.
+
+The fork keeps delayed send but moves the charge to the release:
+
+- A hold needs an authenticated session and an RCPT-stage MTA hook; otherwise
+  `MAIL FROM` answers `501 5.5.4` whatever the `futureRelease` expression says.
+- RCPT (and DATA) hook calls of a held submission carry
+  `context.futureRelease = "hold"`, so the hook can check the account without
+  charging. Each recipient is queued with `RCPT_RELEASE_UNCHECKED` and the login is
+  stored in `Metadata::ReleaseAccount`.
+- When such a recipient is due, `outbound/release_gate.rs` asks the same hook,
+  shaped like an RCPT call for that login, with `context.futureRelease = "release"`
+  and the envelope from the return path to the recipients released so far.
+  `accept` clears the flag and delivery proceeds. A `4xx` reject, a timeout (10 s)
+  or an unreachable hook keeps the recipient waiting on the queue retry intervals;
+  the expiry set at submission is kept, so the sender gets the usual DSN if the
+  window never opens. Any other answer fails the recipient with the hook's message.
+
+`Metadata::ReleaseAccount` is appended with the same shape as `Headers`, so queue
+archives written before it still read. A binary without it cannot read a held
+message that carries it: roll back only with no held messages in the queue.
+Messages held by a binary without the gate carry no flag and are not checked.
+
 ## The DATA hook sees the exact queued bytes
 
 Upstream runs the DATA-stage MTA hook before milter changes and the trusted DATA
