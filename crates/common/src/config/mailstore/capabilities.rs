@@ -210,9 +210,12 @@ impl JmapConfig {
         self.capabilities.account.insert(
             Capability::Submission,
             Capabilities::Submission(SubmissionCapabilities {
-                max_delayed_send: 86400 * 30,
+                // Namailu reserves tenant quota when SMTP accepts each recipient,
+                // not when a queued message is released. Advertising delayed send
+                // would let a client stockpile multiple days' quota for one hour.
+                // Keep this disabled until delivery-time quota accounting exists.
+                max_delayed_send: 0,
                 submission_extensions: VecMap::from_iter([
-                    ("FUTURERELEASE".to_string(), Vec::new()),
                     ("SIZE".to_string(), Vec::new()),
                     ("DSN".to_string(), Vec::new()),
                     ("DELIVERYBY".to_string(), Vec::new()),
