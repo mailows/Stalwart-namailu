@@ -406,6 +406,19 @@ impl EmailSubmissionSet for Server {
                                         .mail_from_parameters(addr.into())
                                         {
                                             Ok(addr) => {
+                                                // Capability advertisement is not a security
+                                                // boundary: direct JMAP callers can still set
+                                                // HOLDFOR/HOLDUNTIL. Quota is charged at RCPT,
+                                                // so delayed releases can exceed the tier at
+                                                // delivery time until a dequeue gate exists.
+                                                if addr.hold_for != 0 || addr.hold_until != 0 {
+                                                    return Ok(Err(SetError::new(
+                                                        SetErrorType::ForbiddenToSend,
+                                                    )
+                                                    .with_description(
+                                                        "Scheduled sending is temporarily unavailable.",
+                                                    )));
+                                                }
                                                 submission.envelope.mail_from = Address {
                                                     email: addr.address.as_ref().to_string(),
                                                     parameters: params,

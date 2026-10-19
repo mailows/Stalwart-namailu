@@ -10,12 +10,11 @@ use crate::{
 };
 use common::{config::smtp::session::Stage, network::SessionStream, scripts::ScriptModification};
 use mail_auth::{IprevOutput, IprevResult, SpfOutput, SpfResult, spf::verify::SpfParameters};
-use mail_parser::DateTime;
 use registry::schema::structs::Rate;
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MAIL_REQUIRETLS, MailFrom, MtPriority};
 use std::{
     borrow::Cow,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use trc::SmtpEvent;
 use utils::DomainPart;
@@ -382,72 +381,17 @@ impl<T: SessionStream> Session<T> {
         }
 
         if from.hold_for != 0 || from.hold_until != 0 {
-            if from.hold_for != 0 && from.hold_until != 0 {
-                trc::event!(
-                    Smtp(SmtpEvent::FutureReleaseInvalid),
-                    SpanId = self.data.session_id,
-                    Details = "Both HOLDFOR and HOLDUNTIL were specified",
-                );
-                self.data.mail_from = None;
-                return self
-                    .write(b"501 5.5.4 Only one of HOLDFOR or HOLDUNTIL may be specified.\r\n")
-                    .await;
-            }
-            if let Some(max_hold) = self
-                .server
-                .eval_if::<Duration, _>(&config.future_release, self, self.data.session_id)
-                .await
-            {
-                let max_hold = max_hold.as_secs();
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
-                let hold_for = if from.hold_for != 0 {
-                    from.hold_for
-                } else if from.hold_until > now {
-                    from.hold_until - now
-                } else {
-                    trc::event!(
-                        Smtp(SmtpEvent::FutureReleaseInvalid),
-                        SpanId = self.data.session_id,
-                        Details = from.hold_until,
-                    );
-                    self.data.mail_from = None;
-                    return self
-                        .write(b"501 5.5.4 HOLDUNTIL must be a date and time in the future.\r\n")
-                        .await;
-                };
-                if hold_for <= max_hold {
-                    self.data.future_release = hold_for;
-                } else {
-                    trc::event!(
-                        Smtp(SmtpEvent::FutureReleaseInvalid),
-                        SpanId = self.data.session_id,
-                        Details = hold_for,
-                    );
-                    self.data.mail_from = None;
-                    let response = if from.hold_for != 0 {
-                        format!(
-                            "501 5.5.4 Requested hold time exceeds maximum of {max_hold} seconds.\r\n"
-                        )
-                    } else {
-                        format!(
-                            "501 5.5.4 Requested release time exceeds maximum of {}.\r\n",
-                            DateTime::from_timestamp((now + max_hold) as i64).to_rfc3339()
-                        )
-                    };
-                    return self.write(response.as_bytes()).await;
-                }
-            } else {
-                trc::event!(
-                    Smtp(SmtpEvent::FutureReleaseDisabled),
-                    SpanId = self.data.session_id,
-                );
-                self.data.mail_from = None;
-                return self
-                    .write(b"501 5.5.4 FUTURERELEASE extension has been disabled.\r\n")
-                    .await;
-            }
+            // Quota is reserved by the RCPT hook at submission time. A future
+            // release could concentrate several days' allowance in one hour;
+            // reject even if stale registry configuration still enables it.
+            trc::event!(
+                Smtp(SmtpEvent::FutureReleaseDisabled),
+                SpanId = self.data.session_id,
+            );
+            self.data.mail_from = None;
+            return self
+                .write(b"501 5.5.4 FUTURERELEASE extension has been disabled.\r\n")
+                .await;
         }
         if has_dsn
             && !self
