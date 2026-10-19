@@ -285,6 +285,7 @@ impl<T: SessionStream> Session<T> {
                 } else {
                     None
                 },
+                future_release: (self.data.future_release != 0).then(|| "hold".to_string()),
                 stage: stage.into(),
                 client: Client {
                     ip: self.data.remote_ip.to_string(),

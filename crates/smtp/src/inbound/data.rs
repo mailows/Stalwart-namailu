@@ -9,8 +9,8 @@ use crate::{
     core::{Session, SessionAddress, State},
     inbound::{dkim::DkimSign, milter::Modification},
     queue::{
-        self, Message, MessageSource, MessageWrapper, QueueEnvelope, RCPT_SPAM_MASK,
-        quota::HasQueueQuota, rcpt_spam_flag, spool::QueueParams,
+        self, Message, MessageSource, MessageWrapper, Metadata, QueueEnvelope,
+        RCPT_RELEASE_UNCHECKED, RCPT_SPAM_MASK, quota::HasQueueQuota, rcpt_spam_flag, spool::QueueParams,
     },
     reporting::analysis::{AnalyzeReport, ReportData},
     scripts::ScriptResult,
@@ -1102,7 +1102,17 @@ impl<T: SessionStream> Session<T> {
         message.message.size = (raw_message.len() + headers.len()) as u64;
 
         // Verify queue quota
-        if let Some(metadata) = self.server.has_quota(&mut message).await {
+        if let Some(mut metadata) = self.server.has_quota(&mut message).await {
+            // Fork (namailu): remember who submitted a held message; the release
+            // gate charges this account's quota when the message leaves the queue.
+            if self.data.future_release != 0
+                && let Some(login) = self.authenticated_as()
+            {
+                metadata.push(Metadata::ReleaseAccount {
+                    value: login.as_bytes().into(),
+                    id: 0,
+                });
+            }
             // Queue message
             let queue_id = message.queue_id;
             let dkim_signers = self
@@ -1258,6 +1268,11 @@ impl<T: SessionStream> Session<T> {
 
             // Update recipient
             let recipient = message.recipients.last_mut().unwrap();
+            if future_release != 0 {
+                // Fork (namailu): the sending quota of a held message is charged
+                // when the queue releases it, not now (`outbound/release_gate.rs`).
+                recipient.flags |= RCPT_RELEASE_UNCHECKED;
+            }
             recipient.retry = retry;
             recipient.notify = notify;
             recipient.expires = expires;

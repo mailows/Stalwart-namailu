@@ -220,6 +220,10 @@ impl QueuedMessage {
             }
         }
 
+        // Fork: a held (FUTURERELEASE) message charges its sending quota now.
+        // Refused recipients fail (DSN below), waiting ones are rescheduled.
+        message.release_gate(&server).await;
+
         // Fork: generated Sieve copy that has not passed the final DATA scan yet.
         if message.scan_pending_gate(&server).await {
             trc::event!(

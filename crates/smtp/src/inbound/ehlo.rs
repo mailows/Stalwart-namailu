@@ -16,7 +16,7 @@ use mail_auth::{
 use smtp_proto::*;
 use std::{
     borrow::Cow,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use trc::SmtpEvent;
 
@@ -225,8 +225,20 @@ impl<T: SessionStream> Session<T> {
             }
         }
 
-        // Do not advertise FUTURERELEASE while the RCPT quota is charged at
-        // submission rather than queue release. MAIL FROM rejects it as well.
+        // Future release
+        if let Some(value) = self
+            .server
+            .eval_if::<Duration, _>(&ec.future_release, self, self.data.session_id)
+            .await
+        {
+            response.capabilities |= EXT_FUTURE_RELEASE;
+            response.future_release_interval = value.as_secs();
+            response.future_release_datetime = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                + value.as_secs();
+        }
 
         // Deliver By
         if let Some(value) = self

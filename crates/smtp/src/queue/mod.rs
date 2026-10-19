@@ -121,6 +121,11 @@ pub enum Metadata {
     QueueSize { key: Box<[u8]>, id: u64 },
     QueueCount { key: Box<[u8]>, id: u64 },
     Headers { value: Box<[u8]>, id: u64 },
+    /// Fork (namailu): SASL login that submitted a held (FUTURERELEASE) message.
+    /// The release gate asks the RCPT hook for this account before delivery.
+    /// Appended last with the same shape as `Headers`, so archives written
+    /// before it still read; a binary without it cannot read messages carrying it.
+    ReleaseAccount { value: Box<[u8]>, id: u64 },
 }
 
 #[derive(
@@ -162,6 +167,10 @@ pub const RCPT_DSN_SENT: u64 = 1 << 32;
 /// Fork (namailu): RCPT hook of this generated Sieve recipient did not answer yet;
 /// the queue asks it (and reserves quota) before delivery. Cleared once allowed.
 pub const RCPT_SIEVE_UNCHECKED: u64 = 1 << 40;
+/// Fork (namailu): recipient of a held message whose sending quota has not been
+/// charged yet; the queue asks the RCPT hook when it releases the message
+/// (`outbound/release_gate.rs`). Cleared once the hook allows it.
+pub const RCPT_RELEASE_UNCHECKED: u64 = 1 << 41;
 
 pub const RCPT_SPAM_SHIFT: u64 = 56;
 pub const RCPT_SPAM_MASK: u64 = 0xff << RCPT_SPAM_SHIFT;
