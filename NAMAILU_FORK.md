@@ -106,7 +106,16 @@ The fork keeps delayed send but moves the charge to the release:
   `accept` clears the flag and delivery proceeds. A `4xx` reject, a timeout (10 s)
   or an unreachable hook keeps the recipient waiting on the queue retry intervals;
   the expiry set at submission is kept, so the sender gets the usual DSN if the
-  window never opens. Any other answer fails the recipient with the hook's message.
+  window never opens. An explicit `reject` fails the recipient with the hook's
+  message; an unknown action or an unparsable answer waits like a `4xx`.
+- The login alone is not enough: an address can be deleted and recreated, and a new
+  mailbox may adopt the old principal. `ReleaseAccount` therefore stores the account
+  id (`id = account_id + 1`; `0` marks entries from the previous fork) and the
+  `MAIL FROM` time in microseconds (`value = "<login>\0<micros>"`). The release call
+  adds `context.releaseAccountId`, `context.releaseQueuedAtUs` and
+  `context.releaseQueueId`; the hook rejects a mailbox created after the submission
+  and can make its quota reservation idempotent per queue recipient. Entries
+  without a complete binding wait for operator review and never inherit a new owner.
 
 `Metadata::ReleaseAccount` is appended with the same shape as `Headers`, so queue
 archives written before it still read. A binary without it cannot read a held

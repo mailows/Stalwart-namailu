@@ -443,6 +443,9 @@ impl<T: SessionStream> Session<T> {
                 };
                 if hold_for <= max_hold {
                     self.data.future_release = hold_for;
+                    self.data.future_release_started_at_us = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_micros().try_into().unwrap_or(0));
                 } else {
                     trc::event!(
                         Smtp(SmtpEvent::FutureReleaseInvalid),

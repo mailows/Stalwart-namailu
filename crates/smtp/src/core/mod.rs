@@ -83,6 +83,8 @@ pub struct SessionData {
     pub priority: i16,
     pub delivery_by: i64,
     pub future_release: u64,
+    /// Submission time, captured at MAIL FROM before RCPT/DATA can block.
+    pub future_release_started_at_us: u64,
 
     pub valid_until: Instant,
     pub bytes_left: usize,
@@ -175,6 +177,7 @@ impl SessionData {
             bytes_left: 0,
             delivery_by: 0,
             future_release: 0,
+            future_release_started_at_us: 0,
             iprev: None,
             spf_ehlo: None,
             spf_mail_from: None,
@@ -299,6 +302,7 @@ impl SessionData {
             priority: 0,
             delivery_by: 0,
             future_release: 0,
+            future_release_started_at_us: 0,
             valid_until: Instant::now(),
             bytes_left: 0,
             messages_sent: 0,

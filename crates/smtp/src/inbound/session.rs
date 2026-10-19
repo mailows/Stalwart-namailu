@@ -492,6 +492,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.priority = 0;
         self.data.delivery_by = 0;
         self.data.future_release = 0;
+        self.data.future_release_started_at_us = 0;
         self.data.rcpt_oks = 0;
         self.data.spam_score = None;
         self.data.spam_tags = None;
