@@ -251,12 +251,24 @@ pub enum SieveRcptCheck {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SievePhase {
+    /// May create a quota reservation; retrying with the same message ID is safe.
+    Reserve,
+    /// Revalidate STOP, suspension and forwarding consent without charging again.
+    Check,
+}
+
 pub async fn sieve_outbound_check(
     server: &Server,
     account: &str,
     recipient: &str,
     is_redirect: bool,
     session_id: u64,
+    account_id: u32,
+    generated_at_us: u64,
+    message_id: &str,
+    phase: SievePhase,
 ) -> SieveRcptCheck {
     let Some(hook) = server
         .core
@@ -274,6 +286,13 @@ pub async fn sieve_outbound_check(
             "stage": "rcpt",
             "sasl": { "login": account },
             "sieve": if is_redirect { "redirect" } else { "message" },
+            "sievePhase": match phase {
+                SievePhase::Reserve => "reserve",
+                SievePhase::Check => "check",
+            },
+            "sieveAccountId": account_id,
+            "sieveGeneratedAtUs": generated_at_us,
+            "sieveMessageId": message_id,
         },
         "envelope": {
             "from": { "address": account },
@@ -323,7 +342,10 @@ pub async fn sieve_outbound_check(
                 Details = "invalid hook response",
                 SpanId = session_id
             );
-            SieveRcptCheck::Denied
+            // The control plane may have committed a quota reservation before
+            // its response was lost or mangled. Keep the copy queued and retry
+            // with the same ID; never charge again or silently drop it.
+            SieveRcptCheck::Unavailable
         }
         Err(reason) => {
             trc::event!(

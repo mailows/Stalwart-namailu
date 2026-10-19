@@ -122,6 +122,21 @@ archives written before it still read. A binary without it cannot read a held
 message that carries it: roll back only with no held messages in the queue.
 Messages held by a binary without the gate carry no flag and are not checked.
 
+## Sieve copies are bound to the original account
+
+User-Sieve redirects, vacation and notify copies carry the Stalwart account id, the
+generation time (µs) and a random 128-bit id, persisted as `Metadata::SieveAccount`
+(`id = account_id + 1`, value `login\0micros\0nonce`) with `FROM_SIEVE_POLICY`.
+The first RCPT hook sends `sievePhase=reserve`. The queue
+(`outbound/scan_pending.rs`) asks the hook again before *every* delivery attempt:
+recipients already charged get `check` (STOP, suspension, forwarding consent, account
+binding), recipients whose first answer was lost or that appeared by alias expansion
+get `reserve`. The control plane keeps one reservation per (nonce, recipient).
+An invalid hook response is `Unavailable` (retry), not a silent drop. A queued
+Sieve copy without the binding (older binary) is held for operator review.
+`SieveAccount` is appended after `ReleaseAccount`; an older binary cannot read
+queue entries that carry it, so rollback needs a drained queue.
+
 ## The DATA hook sees the exact queued bytes
 
 Upstream runs the DATA-stage MTA hook before milter changes and the trusted DATA

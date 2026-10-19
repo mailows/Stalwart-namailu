@@ -492,7 +492,8 @@ impl MessageWrapper {
                         self.message.size as i64,
                     );
                 }
-                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. } => {}
+                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. }
+                | Metadata::SieveAccount { .. } => {}
             }
         }
 
@@ -826,7 +827,8 @@ impl MessageWrapper {
                         -(self.message.size as i64),
                     );
                 }
-                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. } => {}
+                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. }
+                | Metadata::SieveAccount { .. } => {}
             }
         }
 
@@ -989,7 +991,8 @@ impl MessageWrapper {
                         -(self.message.size as i64),
                     );
                 }
-                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. } => {}
+                Metadata::Headers { .. } | Metadata::ReleaseAccount { .. }
+                | Metadata::SieveAccount { .. } => {}
             }
         }
 
