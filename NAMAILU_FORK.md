@@ -229,6 +229,15 @@ OAuth metadata, its issuer and the web admin links. Those must stay on one
 stable host, so they are deliberately left alone. Unset or empty keeps the
 upstream behaviour.
 
+## Default calendar and address book names
+
+Upstream names the lazily created default calendar and address book
+`"<defaultDisplayName> (<account name>)"` and never updates that name. After an
+account is renamed, clients such as Thunderbird keep showing the old address.
+The fork uses `defaultDisplayName` alone. A rename that was already stored is
+not touched here; the deployment renames those once with
+`mail-server/prejmenuj-vychozi-kalendare.py` in the runbook repository.
+
 The provided image enables the PostgreSQL metadata and S3-compatible blob
 backends used by Namailu. Build it with:
 

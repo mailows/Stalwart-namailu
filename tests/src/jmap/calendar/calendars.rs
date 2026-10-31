@@ -43,7 +43,7 @@ pub async fn test(test: &TestServer) {
         list[0],
         json!({
             "id": default_calendar_id,
-            "name": "Stalwart Calendar (jdoe@example.com)",
+            "name": "Stalwart Calendar",
             "description": null,
             "sortOrder": 0,
             "isSubscribed": true,
@@ -308,7 +308,7 @@ pub async fn test(test: &TestServer) {
     }));
     response.list()[1].assert_is_equal(json!({
         "id": default_calendar_id,
-        "name": "Stalwart Calendar (jdoe@example.com)",
+        "name": "Stalwart Calendar",
         "description": (),
         "sortOrder": 0,
         "isSubscribed": true,
