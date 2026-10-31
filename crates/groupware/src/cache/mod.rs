@@ -333,7 +333,6 @@ impl GroupwareCache for Server {
         if let Some(name) = &self.core.groupware.default_addressbook_name {
             let mut batch = BatchBuilder::new();
             let account_id = account_info_owner.account_id();
-            let account_name = account_info_owner.name();
             let document_id = self
                 .store()
                 .assign_document_ids(account_id, Collection::AddressBook, 1)
@@ -342,15 +341,16 @@ impl GroupwareCache for Server {
                 name: name.clone(),
                 preferences: vec![AddressBookPreferences {
                     account_id,
-                    name: format!(
-                        "{} ({})",
-                        self.core
-                            .groupware
-                            .default_addressbook_display_name
-                            .as_ref()
-                            .unwrap_or(name),
-                        account_name
-                    ),
+                    // naMailu fork: no "(account name)" suffix. The account can be
+                    // renamed later and the default name is never updated, so clients
+                    // kept showing the old address (Thunderbird, 31 Oct 2026).
+                    name: self
+                        .core
+                        .groupware
+                        .default_addressbook_display_name
+                        .as_ref()
+                        .unwrap_or(name)
+                        .clone(),
                     ..Default::default()
                 }],
                 subscribers: vec![account_id],
@@ -386,7 +386,6 @@ impl GroupwareCache for Server {
         if let Some(name) = &self.core.groupware.default_calendar_name {
             let mut batch = BatchBuilder::new();
             let account_id = account_info_owner.account_id();
-            let account_name = account_info_owner.name();
             let document_id = self
                 .store()
                 .assign_document_ids(account_id, Collection::Calendar, 1)
@@ -395,15 +394,16 @@ impl GroupwareCache for Server {
                 name: name.clone(),
                 preferences: vec![CalendarPreferences {
                     account_id,
-                    name: format!(
-                        "{} ({})",
-                        self.core
-                            .groupware
-                            .default_calendar_display_name
-                            .as_ref()
-                            .unwrap_or(name),
-                        account_name
-                    ),
+                    // naMailu fork: no "(account name)" suffix. The account can be
+                    // renamed later and the default name is never updated, so clients
+                    // kept showing the old address (Thunderbird, 31 Oct 2026).
+                    name: self
+                        .core
+                        .groupware
+                        .default_calendar_display_name
+                        .as_ref()
+                        .unwrap_or(name)
+                        .clone(),
                     flags: CALENDAR_SUBSCRIBED,
                     ..Default::default()
                 }],
