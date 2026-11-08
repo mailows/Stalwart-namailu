@@ -20,7 +20,7 @@ use ahash::AHashMap;
 use common::{DAEMON_NAME, config::smtp::session::Stage, expr::Bump, network::SessionStream};
 use compact_str::ToCompactString;
 use mail_auth::AuthenticatedMessage;
-use std::time::Instant;
+use std::{borrow::Cow, time::Instant};
 use trc::MtaHookEvent;
 
 /// naMailu fork: attest only the non-null envelope actually evaluated by MAIL FROM
@@ -322,8 +322,16 @@ impl<T: SessionStream> Session<T> {
                     .spam_score
                     .map(|score| spam_server_headers(score, self.data.spam_tags.as_deref()))
                     .unwrap_or_default(),
-                contents: String::from_utf8_lossy(message.raw_body()),
+                // naMailu fork: DATA is transported once, as exact bytes. A
+                // duplicate lossy text copy could exceed the scanner's body limit.
+                contents: if stage == Stage::Data {
+                    Cow::Borrowed("")
+                } else {
+                    String::from_utf8_lossy(message.raw_body())
+                },
                 size: message.raw_message().len(),
+                raw_base64: (stage == Stage::Data)
+                    .then(|| encodify::base64::STANDARD.encode(message.raw_message())),
             }),
         };
 

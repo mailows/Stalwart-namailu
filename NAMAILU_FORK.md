@@ -17,11 +17,11 @@ rewrite and none of them applies as a patch. Plan and status:
 | 6 | default calendar / address book names without the account name | ported | `crates/groupware/src/cache/mod.rs` |
 | 7 | outgoing Sieve (redirect/vacation) asks the RCPT hook, bound to the account | todo | |
 | 8 | delayed send with a release-time quota gate | todo | |
-| 9 | DATA hook on the exact queued bytes, only verdict headers after it | todo | |
+| 9 | DATA hook on the exact queued bytes, only verdict headers after it | ported | `crates/smtp/src/inbound/data.rs`, `crates/smtp/src/inbound/hooks/{mod,message}.rs` |
 | 10 | spam score for the hook also for authenticated mail (`X-Spam-Score`, `X-Spam-Tags`) | ported | `crates/spam-filter/src/analysis/outgoing.rs`, `crates/smtp/src/inbound/{spam,data}.rs`, `crates/smtp/src/inbound/hooks/message.rs` |
 | 11 | `verifiedEnvelopeSender`, `dkimVerifiedFrom` in the hook context | ported | `crates/smtp/src/{core/mod,inbound/{mail,session,data}}.rs`, `crates/smtp/src/inbound/hooks/{mod,message}.rs` |
 | 12 | scan + strip verdict headers on JMAP import/set and IMAP APPEND | ported | `crates/email/src/message/ingest.rs`, `crates/jmap/src/email/{import,set}.rs`, `crates/imap/src/op/append.rs` |
-| 13 | Google FBL: server-owned, DKIM-signed Feedback-ID | todo | |
+| 13 | Google FBL: server-owned, DKIM-signed Feedback-ID | ported | `crates/smtp/src/inbound/{data,dkim}.rs`, `crates/common/src/config/smtp/auth.rs` |
 
 ## Unified password (1, 3, 5)
 
@@ -69,6 +69,36 @@ the single HTTPS `/mta-hook` with its headers and client). The verdict must name
 and `limit` are refused (550), anything else that is not clean, a missing scanner
 or a network error is a temporary failure (451). An imported blob that was
 stripped is stored as a new blob.
+
+## DATA hook on the exact queued bytes (9)
+
+Upstream runs the DATA hook on the received message, before milter changes and
+trusted DATA Sieve, and applies its answer through the generic milter modifier,
+which rewrites every header. The fork applies milter changes first, runs Sieve,
+normalizes `Feedback-ID` (13) and then runs the hook last on exactly the bytes
+that will be queued (`message.rawBase64`; the lossy text `contents` is empty at
+DATA) with the final envelope. After the hook only `X-Namailu-Scan-Status`,
+`X-Namailu-Scan-Engine` (both required) and the removal of
+`X-Namailu-Quarantine-Release` are applied, byte for byte; any other change, or a
+missing verdict, is `451 4.3.0`. A milter or Sieve that adds or duplicates a
+recipient not authorized at RCPT (where quotas and agent restrictions are
+charged) is `451`. If a filter changed the message, `dkimVerifiedFrom` is
+dropped and authenticated mail is scored again on the final bytes.
+
+## Google Feedback Loop header (13)
+
+Authenticated submission: every client `Feedback-ID` (with folded lines) is
+removed and one server-owned value is added before the DATA hook:
+`<org-tag>:<account-tag>:mail:namailu`, each tag the first 12 hex digits of a
+keyed BLAKE3 hash of a Stalwart id, keyed from `STALWART_FEEDBACK_ID_KEY` (at least
+32 characters; without it no header is added, client values are still removed).
+Same KDF context as the 0.16 fork, so tags stay identical as long as account and
+domain ids survive the migration. The org tag is the tenant if there is one (not
+with the `postgres s3` build), otherwise the domain of the account's primary
+address. Authenticated mail is DKIM1-signed by a second set of signers built from
+the same keys that always cover `Feedback-ID`, also for older keys whose persisted
+header list lacks it; other mail never signs a `Feedback-ID`. (The registry
+default header list is generated code and left unchanged.)
 
 ## Build
 

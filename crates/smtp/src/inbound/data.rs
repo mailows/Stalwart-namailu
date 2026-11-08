@@ -692,6 +692,16 @@ impl<T: SessionStream> Session<T> {
             self.data.spam_tags = Some(tags);
         }
 
+        // naMailu fork: RCPT is where outbound quotas and agent gateway
+        // restrictions are charged. A DATA filter must not add a recipient that
+        // skipped RCPT.
+        let rcpt_before_filters = self
+            .data
+            .rcpt_to
+            .iter()
+            .map(|recipient| recipient.address_lcase.clone())
+            .collect::<Vec<_>>();
+
         // Run Milter filters
         let mut modifications = Vec::new();
         match self
@@ -708,21 +718,10 @@ impl<T: SessionStream> Session<T> {
             }
         };
 
-        // Run MTA Hooks
-        match self
-            .run_mta_hooks(Stage::Data, (&auth_message).into(), message_id.into())
-            .await
-        {
-            Ok(modifications_) => {
-                if !modifications_.is_empty() {
-                    modifications.retain(|m| !matches!(m, Modification::ReplaceBody { .. }));
-                    modifications.extend(modifications_);
-                }
-            }
-            Err(response) => {
-                return response.into_bytes();
-            }
-        };
+        // naMailu fork: the DATA MTA hook runs last, on the exact bytes that will
+        // be queued (below, after trusted Sieve). Milter changes are applied first:
+        // the scanner must never approve a body that a later filter replaces.
+        let milter_changed = !modifications.is_empty();
 
         // Apply modifications
         let needs_arrival_envelope = has_dkim2_fields && dkim2_output.is_none();
@@ -748,6 +747,8 @@ impl<T: SessionStream> Session<T> {
 
         // Sieve filtering
         let mut sieve_redirected = false;
+        let mut sieve_added_headers = false;
+        let mut sieve_changed_envelope = false;
         if let Some((script, script_id)) =
             self.eval_if::<String>(&dc.script).await.and_then(|name| {
                 self.server
@@ -843,6 +844,7 @@ impl<T: SessionStream> Session<T> {
             for modification in modifications {
                 match modification {
                     ScriptModification::AddHeader { name, value } => {
+                        sieve_added_headers = true;
                         headers.extend_from_slice(name.as_bytes());
                         headers.extend_from_slice(b": ");
                         headers.extend_from_slice(value.as_bytes());
@@ -851,6 +853,7 @@ impl<T: SessionStream> Session<T> {
                         }
                     }
                     ScriptModification::SetEnvelope { name, value } => {
+                        sieve_changed_envelope = true;
                         if needs_arrival_envelope
                             && arrival_envelope.is_none()
                             && matches!(name, Envelope::From | Envelope::To)
@@ -861,6 +864,113 @@ impl<T: SessionStream> Session<T> {
                     }
                 }
             }
+        }
+
+        // naMailu fork: normalize the submitted Feedback-ID before the DATA hook.
+        // The scanner must see exactly the Feedback-ID bytes that DKIM signs.
+        if let Some(account) = &self.data.authenticated_as {
+            if let Some(stripped) = strip_submitted_feedback_id(
+                edited_message.as_deref().unwrap_or(raw_message.as_slice()),
+            ) {
+                edited_message = Some(stripped);
+            }
+            if let Some(stripped) = strip_submitted_feedback_id(&headers) {
+                headers = stripped;
+            }
+            // Read per message (one env lookup and one BLAKE3 key derivation).
+            if let Some(key) =
+                feedback_id_key(std::env::var(FEEDBACK_ID_KEY_ENV).ok().as_deref()).as_ref()
+            {
+                #[cfg(feature = "enterprise")]
+                let tenant_id = account.account.id_tenant;
+                #[cfg(not(feature = "enterprise"))]
+                let tenant_id = None;
+                headers.extend_from_slice(
+                    feedback_id_header(
+                        key,
+                        feedback_id_org(
+                            tenant_id,
+                            account.account.addresses.first().map(|a| a.domain_id),
+                        ),
+                        account.account_id,
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+
+        // naMailu fork: a DATA filter (milter, Sieve) cannot add or duplicate a
+        // recipient beyond what RCPT authorized.
+        let final_recipients = self
+            .data
+            .rcpt_to
+            .iter()
+            .map(|recipient| recipient.address_lcase.clone())
+            .collect::<Vec<_>>();
+        if !final_recipients_authorized(&rcpt_before_filters, &final_recipients) {
+            return (&b"451 4.3.0 DATA filter added an unchecked recipient.\r\n"[..]).into();
+        }
+
+        // naMailu fork: the DATA hook is the authoritative content and recipient
+        // gate. Give it the same bytes that will be queued, including headers
+        // generated by trusted DATA Sieve and any milter replacement, and the final
+        // envelope. Only scanner verdict headers may change after this point.
+        if self
+            .server
+            .core
+            .smtp
+            .session
+            .hooks
+            .iter()
+            .any(|hook| hook.run_on_stage.contains(&Stage::Data))
+        {
+            let body = edited_message.as_deref().unwrap_or(raw_message.as_slice());
+            let mut scan_raw = Vec::with_capacity(headers.len() + body.len());
+            scan_raw.extend_from_slice(&headers);
+            scan_raw.extend_from_slice(body);
+            let Some(scan_parsed) = MessageParser::new()
+                .parse(&scan_raw)
+                .filter(|parsed| parsed.headers().has_known())
+            else {
+                return (&b"451 4.3.0 Unable to scan final message.\r\n"[..]).into();
+            };
+            if edited_message.is_some() || sieve_added_headers {
+                // Authentication results belong to the original message, not
+                // necessarily to the body or From produced by trusted filters.
+                self.data.dkim_verified_from = None;
+            }
+            if (milter_changed || sieve_added_headers || sieve_changed_envelope)
+                && self.is_authenticated()
+                && self.server.core.spam.enabled
+                && self.eval_if(&dc.spam_filter).await.unwrap_or(true)
+            {
+                self.data.spam_score = None;
+                self.data.spam_tags = None;
+                if let Some((score, tags)) = self
+                    .spam_score_outgoing(&scan_parsed, &[], None, None, None, None)
+                    .await
+                {
+                    self.data.spam_score = Some(score);
+                    self.data.spam_tags = Some(tags);
+                }
+            }
+            let scan_auth = AuthenticatedMessage::from_parsed(
+                &scan_parsed,
+                &scan_raw,
+                self.server.core.smtp.mail_auth.dkim.strict,
+            );
+            let hook_changes = match self
+                .run_mta_hooks(Stage::Data, Some(&scan_auth), Some(message_id))
+                .await
+            {
+                Ok(changes) => changes,
+                Err(response) => return response.into_bytes(),
+            };
+            let Some(scanned_message) = apply_scan_verdict_headers(&scan_raw, hook_changes) else {
+                return (&b"451 4.3.0 Unsafe post-scan modification.\r\n"[..]).into();
+            };
+            edited_message = Some(scanned_message);
+            headers.clear();
         }
 
         // Build message
@@ -1278,6 +1388,332 @@ impl ArrivalEnvelope {
                 .iter()
                 .map(String::as_str)
                 .eq(data.rcpt_to.iter().map(|rcpt| rcpt.address.as_str()))
+    }
+}
+
+/// naMailu fork: remove every top-level Feedback-ID field (including folded
+/// continuation lines) from an authenticated submission. The body and all other
+/// headers are copied byte for byte; messages without the field are untouched.
+fn strip_submitted_feedback_id(message: &[u8]) -> Option<Vec<u8>> {
+    let mut cleaned: Option<Vec<u8>> = None;
+    let mut offset = 0;
+    let mut skip = false;
+
+    while offset < message.len() {
+        let end = message[offset..]
+            .iter()
+            .position(|&byte| byte == b'\r' || byte == b'\n')
+            .map_or(message.len(), |pos| {
+                let end = offset + pos + 1;
+                if message[end - 1] == b'\r' && message.get(end) == Some(&b'\n') {
+                    end + 1
+                } else {
+                    end
+                }
+            });
+        let line = &message[offset..end];
+        if line == b"\r\n" || line == b"\n" || line == b"\r" {
+            if let Some(cleaned) = &mut cleaned {
+                cleaned.extend_from_slice(&message[offset..]);
+            }
+            break;
+        }
+
+        if !matches!(line.first(), Some(b' ' | b'\t')) {
+            skip = line
+                .iter()
+                .position(|&byte| byte == b':')
+                .is_some_and(|colon| {
+                    line[..colon]
+                        .trim_ascii_end()
+                        .eq_ignore_ascii_case(b"Feedback-ID")
+                });
+            if skip && cleaned.is_none() {
+                cleaned = Some(message[..offset].to_vec());
+            }
+        }
+        if !skip && let Some(cleaned) = &mut cleaned {
+            cleaned.extend_from_slice(line);
+        }
+        offset = end;
+    }
+
+    cleaned
+}
+
+/// naMailu fork: secret for opaque Feedback-ID tags. The header must stay stable
+/// per organisation/account (Google aggregates by it), but recipients must not
+/// learn internal sequential ids. Without a key (or one shorter than 32 bytes)
+/// no Feedback-ID is added; client values are still stripped.
+const FEEDBACK_ID_KEY_ENV: &str = "STALWART_FEEDBACK_ID_KEY";
+const FEEDBACK_ID_KDF_CONTEXT: &str = "namailu 2026-10-18 Feedback-ID tags v1";
+
+fn feedback_id_key(secret: Option<&str>) -> Option<[u8; 32]> {
+    secret
+        .map(str::trim)
+        .filter(|secret| secret.len() >= 32)
+        .map(|secret| blake3::derive_key(FEEDBACK_ID_KDF_CONTEXT, secret.as_bytes()))
+}
+
+fn feedback_id_tag(key: &[u8; 32], kind: u8, id: u32) -> String {
+    let mut input = [0u8; 5];
+    input[0] = kind;
+    input[1..].copy_from_slice(&id.to_be_bytes());
+    blake3::keyed_hash(key, &input).to_hex()[..12].to_string()
+}
+
+/// naMailu fork: the first Feedback-ID field identifies the sending organisation.
+/// Without a Stalwart tenant the domain of the account's primary address stands
+/// in for it: a customer's own domain is one organisation, and the shared domains
+/// group their (individually tagged) accounts together.
+fn feedback_id_org(tenant_id: Option<u32>, primary_domain_id: Option<u32>) -> (u8, u32) {
+    match (tenant_id, primary_domain_id) {
+        (Some(tenant_id), _) => (b't', tenant_id),
+        (None, Some(domain_id)) => (b'd', domain_id),
+        (None, None) => (b't', 0),
+    }
+}
+
+fn feedback_id_header(key: &[u8; 32], org: (u8, u32), account_id: u32) -> String {
+    format!(
+        "Feedback-ID: {}:{}:mail:namailu\r\n",
+        feedback_id_tag(key, org.0, org.1),
+        feedback_id_tag(key, b'a', account_id)
+    )
+}
+
+#[cfg(test)]
+mod namailu_feedback_id_tests {
+    use super::{
+        feedback_id_header, feedback_id_key, feedback_id_org, strip_submitted_feedback_id,
+    };
+
+    #[test]
+    fn strips_every_submitted_feedback_id_with_folding() {
+        let input = b"From: a@example.test\r\nFeedback-ID: forged:tenant:mail:namailu\r\n\tcontinued\r\nSubject: test\r\nfEeDbAcK-Id : another:forgery\r\nTo: b@example.test\r\n\r\nFeedback-ID: body text\r\n";
+        let expected = b"From: a@example.test\r\nSubject: test\r\nTo: b@example.test\r\n\r\nFeedback-ID: body text\r\n";
+        assert_eq!(
+            strip_submitted_feedback_id(input).as_deref(),
+            Some(&expected[..])
+        );
+    }
+
+    #[test]
+    fn leaves_messages_without_feedback_id_untouched() {
+        let input = b"From: a@example.test\r\nSubject: test\r\n\r\nbody";
+        assert!(strip_submitted_feedback_id(input).is_none());
+    }
+
+    #[test]
+    fn bare_cr_lines_are_handled() {
+        let input = b"From: a@example.test\rFeedback-ID: forged\r\rcontent\r";
+        assert_eq!(
+            strip_submitted_feedback_id(input).as_deref(),
+            Some(&b"From: a@example.test\r\rcontent\r"[..])
+        );
+    }
+
+    #[test]
+    fn opaque_stable_tags() {
+        let key = feedback_id_key(Some("0123456789abcdef0123456789abcdef")).unwrap();
+        let header = feedback_id_header(&key, (b't', 31), 255);
+        assert_eq!(header, feedback_id_header(&key, (b't', 31), 255));
+        assert!(header.starts_with("Feedback-ID: ") && header.ends_with(":mail:namailu\r\n"));
+        let fields: Vec<&str> = header["Feedback-ID: ".len()..]
+            .trim_end()
+            .split(':')
+            .collect();
+        assert_eq!(fields.len(), 4);
+        assert!(
+            fields[..2]
+                .iter()
+                .all(|tag| tag.len() == 12 && tag.bytes().all(|b| b.is_ascii_hexdigit()))
+        );
+        assert_ne!(header, feedback_id_header(&key, (b't', 31), 256));
+        assert_ne!(header, feedback_id_header(&key, (b't', 32), 255));
+        let other = feedback_id_key(Some("another-secret-another-secret-123")).unwrap();
+        assert_ne!(header, feedback_id_header(&other, (b't', 31), 255));
+    }
+
+    #[test]
+    fn org_falls_back_to_primary_domain() {
+        assert_eq!(feedback_id_org(Some(7), Some(3)), (b't', 7));
+        assert_eq!(feedback_id_org(None, Some(3)), (b'd', 3));
+        assert_eq!(feedback_id_org(None, None), (b't', 0));
+        let key = feedback_id_key(Some("0123456789abcdef0123456789abcdef")).unwrap();
+        assert_ne!(
+            feedback_id_header(&key, (b't', 3), 1),
+            feedback_id_header(&key, (b'd', 3), 1)
+        );
+    }
+
+    #[test]
+    fn short_or_missing_key_disables_the_header() {
+        assert!(feedback_id_key(None).is_none());
+        assert!(feedback_id_key(Some("short")).is_none());
+    }
+}
+
+/// naMailu fork: headers only the scanner may set after the DATA hook.
+fn is_scanner_header(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"X-Namailu-Scan-Status")
+        || name.eq_ignore_ascii_case(b"X-Namailu-Scan-Engine")
+        || name.eq_ignore_ascii_case(b"X-Namailu-Quarantine-Release")
+}
+
+/// naMailu fork: every final recipient must have been authorized at RCPT, at
+/// most as many times as it was authorized.
+fn final_recipients_authorized(original: &[String], final_recipients: &[String]) -> bool {
+    let mut permitted = std::collections::HashMap::new();
+    for address in original {
+        *permitted.entry(address.as_str()).or_insert(0usize) += 1;
+    }
+    final_recipients.iter().all(|address| {
+        let Some(remaining) = permitted.get_mut(address.as_str()) else {
+            return false;
+        };
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        true
+    })
+}
+
+/// naMailu fork: apply only the scanner's verdict headers. Every other byte is
+/// preserved, including folded MIME headers and 8BITMIME bodies; the generic
+/// milter rewrite normalizes all headers and must not run after the content
+/// verdict. A missing verdict or any other change fails closed (`None`).
+fn apply_scan_verdict_headers(raw: &[u8], changes: Vec<Modification>) -> Option<Vec<u8>> {
+    let mut additions = Vec::new();
+    let mut status_seen = false;
+    let mut engine_seen = false;
+    for change in changes {
+        match change {
+            Modification::AddHeader { name, value }
+                if !value.is_empty()
+                    && !value.bytes().any(|byte| byte == b'\r' || byte == b'\n') =>
+            {
+                if name.eq_ignore_ascii_case("X-Namailu-Scan-Status") && !status_seen {
+                    status_seen = true;
+                } else if name.eq_ignore_ascii_case("X-Namailu-Scan-Engine") && !engine_seen {
+                    engine_seen = true;
+                } else {
+                    return None;
+                }
+                additions.extend_from_slice(name.as_bytes());
+                additions.extend_from_slice(b": ");
+                additions.extend_from_slice(value.as_bytes());
+                additions.extend_from_slice(b"\r\n");
+            }
+            Modification::ChangeHeader { name, value, .. }
+                if value.is_empty() && is_scanner_header(name.as_bytes()) => {}
+            _ => return None,
+        }
+    }
+    if !status_seen || !engine_seen {
+        return None;
+    }
+
+    let mut output = Vec::with_capacity(raw.len() + additions.len());
+    output.extend_from_slice(&additions);
+    let mut offset = 0;
+    let mut keep = true;
+    loop {
+        let line_end = raw[offset..].iter().position(|byte| *byte == b'\n')? + offset + 1;
+        let line = &raw[offset..line_end];
+        if line == b"\r\n" || line == b"\n" {
+            output.extend_from_slice(&raw[offset..]);
+            return Some(output);
+        }
+        if !line
+            .first()
+            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+        {
+            let colon = line.iter().position(|byte| *byte == b':')?;
+            keep = !is_scanner_header(&line[..colon]);
+        }
+        if keep {
+            output.extend_from_slice(line);
+        }
+        offset = line_end;
+    }
+}
+
+#[cfg(test)]
+mod namailu_final_scan_tests {
+    use super::{Modification, apply_scan_verdict_headers, final_recipients_authorized};
+
+    fn verdict() -> Vec<Modification> {
+        vec![
+            Modification::ChangeHeader {
+                index: 1,
+                name: "X-Namailu-Quarantine-Release".into(),
+                value: String::new(),
+            },
+            Modification::AddHeader {
+                name: "X-Namailu-Scan-Status".into(),
+                value: "clean".into(),
+            },
+            Modification::AddHeader {
+                name: "X-Namailu-Scan-Engine".into(),
+                value: "clamav".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn preserves_other_header_and_body_bytes() {
+        let raw = b"Content-Type:\ttext/plain\r\n\tcharset=utf-8\r\nX-Namailu-Quarantine-Release: secret\r\nX-Other: \xff\r\n\r\n\xff\x80body";
+        let expected = b"X-Namailu-Scan-Status: clean\r\nX-Namailu-Scan-Engine: clamav\r\nContent-Type:\ttext/plain\r\n\tcharset=utf-8\r\nX-Other: \xff\r\n\r\n\xff\x80body";
+        assert_eq!(
+            apply_scan_verdict_headers(raw, verdict()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rejects_content_or_envelope_changes_and_missing_verdict() {
+        let raw = b"Subject: test\r\n\r\nbody";
+        assert!(apply_scan_verdict_headers(raw, vec![]).is_none());
+        for unsafe_change in [
+            Modification::ReplaceBody {
+                value: b"unscanned".to_vec(),
+            },
+            Modification::ChangeFrom {
+                sender: "other@example.test".into(),
+                args: String::new(),
+            },
+            Modification::AddRcpt {
+                recipient: "other@example.test".into(),
+                args: String::new(),
+            },
+            Modification::AddHeader {
+                name: "Content-Type".into(),
+                value: "text/plain".into(),
+            },
+        ] {
+            let mut changes = verdict();
+            changes.push(unsafe_change);
+            assert!(apply_scan_verdict_headers(raw, changes).is_none());
+        }
+    }
+
+    #[test]
+    fn data_filter_cannot_add_or_duplicate_rcpt_beyond_rcpt_authorization() {
+        let authorized = vec!["a@example.test".into(), "b@example.test".into()];
+        assert!(final_recipients_authorized(
+            &authorized,
+            &["a@example.test".into()]
+        ));
+        assert!(!final_recipients_authorized(
+            &authorized,
+            &["a@example.test".into(), "c@example.test".into()]
+        ));
+        assert!(!final_recipients_authorized(
+            &authorized,
+            &["a@example.test".into(), "a@example.test".into()]
+        ));
     }
 }
 

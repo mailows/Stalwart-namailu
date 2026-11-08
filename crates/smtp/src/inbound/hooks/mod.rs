@@ -137,6 +137,12 @@ pub struct Message<'x> {
     pub server_headers: Vec<(String, String)>,
     pub contents: Cow<'x, str>,
     pub size: usize,
+    /// naMailu fork: at DATA the exact bytes that will be queued, base64. The
+    /// legacy text `contents` is lossy for 8BITMIME and is then left empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "rawBase64")]
+    #[serde(default)]
+    pub raw_base64: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

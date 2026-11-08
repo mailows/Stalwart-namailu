@@ -24,7 +24,7 @@ use registry::{
             Dkim1Signature, Dkim2Signature, DkimSignature, MtaStageData, SecretText, SenderAuth,
         },
     },
-    types::ObjectImpl,
+    types::{ObjectImpl, map::Map},
 };
 use rustls_pki_types::{PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, pem::PemObject};
 use std::borrow::Cow;
@@ -89,6 +89,9 @@ pub struct Dkim2Signers {
 #[derive(Default)]
 pub struct DkimSigners {
     pub dkim1: Vec<Dkim1Signer>,
+    /// naMailu fork: the same keys for authenticated submission; they always sign
+    /// the server-owned `Feedback-ID` (see `feedback_id_headers`).
+    pub dkim1_authenticated: Vec<Dkim1Signer>,
     pub dkim2: Option<Dkim2Signers>,
 }
 
@@ -150,17 +153,41 @@ impl DkimSigners {
 
         match signature {
             DkimSignature::Dkim1Ed25519Sha256(signature) => {
-                let key = ed25519_key_parse(&private_key(&signature.private_key).await?)?;
+                let pem = private_key(&signature.private_key).await?;
+                let key = ed25519_key_parse(&pem)?;
+                let authenticated_key = ed25519_key_parse(&pem)?;
                 self.dkim1
                     .push(Dkim1Signer::Ed25519Sha256(build_dkim1_signer(
-                        domain, signature, key,
+                        domain.clone(),
+                        signature.clone(),
+                        key,
+                        false,
+                    )));
+                self.dkim1_authenticated
+                    .push(Dkim1Signer::Ed25519Sha256(build_dkim1_signer(
+                        domain,
+                        signature,
+                        authenticated_key,
+                        true,
                     )));
             }
             DkimSignature::Dkim1RsaSha256(signature) => {
-                let key = rsa_key_parse(private_key(&signature.private_key).await?.as_bytes())?;
+                let pem = private_key(&signature.private_key).await?;
+                let key = rsa_key_parse(pem.as_bytes())?;
+                let authenticated_key = rsa_key_parse(pem.as_bytes())?;
                 self.dkim1.push(Dkim1Signer::RsaSha256(build_dkim1_signer(
-                    domain, signature, key,
+                    domain.clone(),
+                    signature.clone(),
+                    key,
+                    false,
                 )));
+                self.dkim1_authenticated
+                    .push(Dkim1Signer::RsaSha256(build_dkim1_signer(
+                        domain,
+                        signature,
+                        authenticated_key,
+                        true,
+                    )));
             }
             DkimSignature::Dkim2Ed25519Sha256(signature) => {
                 self.insert_dkim2(domain, signature, |pem| {
@@ -297,15 +324,30 @@ pub fn pem_or_base64_decode(contents: &str) -> Result<Vec<u8>, CodecError> {
     }
 }
 
+/// naMailu fork: never sign a `Feedback-ID` copied from an unauthenticated
+/// message (e.g. a Sieve redirect). For authenticated submission, cover the
+/// server-owned header even when an older key has a persisted header list
+/// without it, so existing domains need no key rotation.
+fn feedback_id_headers(mut headers: Map<String>, authenticated: bool) -> Map<String> {
+    headers
+        .inner_mut()
+        .retain(|header| !header.eq_ignore_ascii_case("Feedback-ID"));
+    if authenticated {
+        headers.push("Feedback-ID".to_string());
+    }
+    headers
+}
+
 fn build_dkim1_signer<T: SigningKey>(
     domain: String,
     signature: Dkim1Signature,
     key: T,
+    authenticated: bool,
 ) -> mail_auth::dkim::DkimSigner<T, Ready> {
     let mut signer = mail_auth::dkim::DkimSigner::from_key(key)
         .domain(domain)
         .selector(signature.selector)
-        .headers(signature.headers)
+        .headers(feedback_id_headers(signature.headers, authenticated))
         .reporting(signature.report);
 
     match signature.canonicalization {
@@ -400,10 +442,48 @@ impl CacheItemWeight for DkimSigners {
         (std::mem::size_of::<Self>()
             + self.dkim1.capacity() * std::mem::size_of::<Dkim1Signer>()
             + self.dkim1.iter().map(Dkim1Signer::heap_size).sum::<usize>()
+            + self.dkim1_authenticated.capacity() * std::mem::size_of::<Dkim1Signer>()
+            + self
+                .dkim1_authenticated
+                .iter()
+                .map(Dkim1Signer::heap_size)
+                .sum::<usize>()
             + self.dkim2.as_ref().map_or(0, |dkim2| {
                 dkim2.signer.heap_size()
                     + dkim2.hashes.capacity() * std::mem::size_of::<Dkim2Hash>()
             })) as u64
+    }
+}
+
+#[cfg(test)]
+mod namailu_feedback_id_tests {
+    use super::{Map, feedback_id_headers};
+
+    #[test]
+    fn adds_header_to_legacy_signature_without_changing_existing_order() {
+        let headers = Map::new(vec!["From".to_string(), "Subject".to_string()]);
+        assert_eq!(
+            feedback_id_headers(headers, true).into_inner(),
+            vec!["From", "Subject", "Feedback-ID"]
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_header_with_different_case() {
+        let headers = Map::new(vec!["From".to_string(), "feedback-id".to_string()]);
+        assert_eq!(
+            feedback_id_headers(headers, true).into_inner(),
+            vec!["From", "Feedback-ID"]
+        );
+    }
+
+    #[test]
+    fn does_not_sign_untrusted_feedback_id() {
+        let headers = Map::new(vec!["From".to_string(), "Feedback-ID".to_string()]);
+        assert_eq!(
+            feedback_id_headers(headers, false).into_inner(),
+            vec!["From"]
+        );
     }
 }
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::queue::{MessageWrapper, Metadata, spool::QueueParams};
+use crate::queue::{FROM_AUTHENTICATED, MessageWrapper, Metadata, spool::QueueParams};
 use ahash::AHashSet;
 use common::{
     Server,
@@ -108,7 +108,13 @@ impl DkimSign for Server {
         {
             let raw_message = stripped_message.as_deref().unwrap_or(params.raw_message);
             headers.reserve(64 + dkim2_headers.len());
-            for signer in &signers.dkim1 {
+            // naMailu fork: authenticated submission signs the server-owned Feedback-ID.
+            let dkim1_signers = if message.message.flags & FROM_AUTHENTICATED != 0 {
+                &signers.dkim1_authenticated
+            } else {
+                &signers.dkim1
+            };
+            for signer in dkim1_signers {
                 let result = match (signer, params.raw_headers) {
                     (Dkim1Signer::RsaSha256(signer), None) => signer.sign(raw_message),
                     (Dkim1Signer::Ed25519Sha256(signer), None) => signer.sign(raw_message),
