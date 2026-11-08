@@ -977,7 +977,9 @@ impl MessageWrapper {
                         to: BlobLink::Id { id: self.queue_id },
                     });
                 }
-                Metadata::Headers { .. } | Metadata::Submission { .. } => {}
+                Metadata::Headers { .. }
+                | Metadata::Submission { .. }
+                | Metadata::SieveAccount { .. } => {}
             }
         }
 
@@ -1139,7 +1141,9 @@ impl MessageWrapper {
                         to: BlobLink::Id { id: self.queue_id },
                     });
                 }
-                Metadata::Headers { .. } | Metadata::Submission { .. } => {}
+                Metadata::Headers { .. }
+                | Metadata::Submission { .. }
+                | Metadata::SieveAccount { .. } => {}
             }
         }
 

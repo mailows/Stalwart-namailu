@@ -29,6 +29,9 @@ bytecount = "0.6"
 # naMailu fork: client append scan (verdict digest and JSON)
 serde_json = "1.0"
 sha2 = "0.11"
+# naMailu fork: outgoing Sieve copies (score and raw bytes for the MTA hook)
+spam-filter = { path = "../spam-filter" }
+encodify = "1.0"
 
 [features]
 enterprise = ["utils/enterprise", "store/enterprise", "trc/enterprise", "jmap_proto/enterprise", "common/enterprise", "groupware/enterprise", "registry/enterprise"]

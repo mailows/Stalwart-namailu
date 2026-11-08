@@ -16,6 +16,9 @@ use utils::hash128::Hash128;
 pub mod delete;
 pub mod index;
 pub mod ingest;
+// naMailu fork: outgoing Sieve copies ask the MTA hook (NAMAILU_FORK.md #7)
+pub mod outbound_hook;
+pub mod outgoing_spam;
 
 #[derive(Debug)]
 pub struct ActiveScript {

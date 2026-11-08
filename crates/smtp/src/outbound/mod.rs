@@ -27,6 +27,8 @@ pub mod error;
 pub mod local;
 pub mod lookup;
 pub mod mta_sts;
+// naMailu fork (#7): queued Sieve copies are rechecked before delivery
+pub mod scan_pending;
 pub mod session;
 
 pub(super) enum DeliveryResult {
