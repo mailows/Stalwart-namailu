@@ -110,6 +110,12 @@ pub struct SessionData {
     /// naMailu fork: the single header From covered by a passing, aligned DKIM
     /// signature of this message (see `hooks::message::dkim_verified_from`).
     pub dkim_verified_from: Option<String>,
+    /// naMailu fork: spam filter score of the message being processed, passed to
+    /// the DATA-stage MTA hook (`serverHeaders`, `X-Spam-Score`) so it can apply
+    /// its own policy, e.g. a lower threshold for authenticated (outgoing) mail.
+    pub spam_score: Option<f32>,
+    /// naMailu fork: tags behind `spam_score` for authenticated mail.
+    pub spam_tags: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +196,8 @@ impl SessionData {
             spf_checked_sender: None,
             dnsbl_error: None,
             dkim_verified_from: None,
+            spam_score: None,
+            spam_tags: None,
         }
     }
 }
@@ -329,6 +337,8 @@ impl SessionData {
             spf_checked_sender: None,
             dnsbl_error: None,
             dkim_verified_from: None,
+            spam_score: None,
+            spam_tags: None,
         }
     }
 }

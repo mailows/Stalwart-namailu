@@ -71,6 +71,15 @@ fn signature_vouches_for(from: &str, d: &str, l: u64, signed_headers: &[String])
         && (domain == d || domain.ends_with(&format!(".{d}")))
 }
 
+/// naMailu fork: `serverHeaders` with the spam filter verdict for the hook.
+fn spam_server_headers(score: f32, tags: Option<&str>) -> Vec<(String, String)> {
+    let mut headers = vec![("X-Spam-Score".to_string(), format!("{score:.2}"))];
+    if let Some(tags) = tags {
+        headers.push(("X-Spam-Tags".to_string(), tags.to_string()));
+    }
+    headers
+}
+
 impl<T: SessionStream> Session<T> {
     pub async fn run_mta_hooks(
         &self,
@@ -307,7 +316,12 @@ impl<T: SessionStream> Session<T> {
                     .iter()
                     .map(|(k, v)| (String::from_utf8_lossy(k), String::from_utf8_lossy(v)))
                     .collect(),
-                server_headers: vec![],
+                // naMailu fork: the spam filter's score for this message.
+                server_headers: self
+                    .data
+                    .spam_score
+                    .map(|score| spam_server_headers(score, self.data.spam_tags.as_deref()))
+                    .unwrap_or_default(),
                 contents: String::from_utf8_lossy(message.raw_body()),
                 size: message.raw_message().len(),
             }),
@@ -339,8 +353,20 @@ fn flatten_parameters(parameters: AHashMap<String, Option<String>>) -> String {
 
 #[cfg(test)]
 mod namailu_tests {
-    use super::{Stage, signature_vouches_for, verified_envelope_sender};
+    use super::{Stage, signature_vouches_for, spam_server_headers, verified_envelope_sender};
     use mail_auth::SpfResult;
+
+    #[test]
+    fn spam_score_goes_to_server_headers() {
+        assert_eq!(
+            spam_server_headers(7.256, Some("GTUBE(10.0)")),
+            vec![
+                ("X-Spam-Score".to_string(), "7.26".to_string()),
+                ("X-Spam-Tags".to_string(), "GTUBE(10.0)".to_string())
+            ]
+        );
+        assert_eq!(spam_server_headers(-1.0, None).len(), 1);
+    }
 
     #[test]
     fn aligned_signature_covering_from_without_length_limit() {

@@ -12,6 +12,7 @@ use spam_filter::{
     MessageTexts, SpamFilterInput,
     analysis::{
         init::SpamFilterInit,
+        outgoing::SpamFilterScoreOutgoing,
         score::{SpamFilterAnalyzeScore, SpamFilterScore},
     },
 };
@@ -45,6 +46,41 @@ impl<T: SessionStream> Session<T> {
             // Do not classify authenticated sessions
             SpamFilterAction::Disabled
         }
+    }
+
+    /// naMailu fork: score an authenticated (outgoing) message without acting on
+    /// it. Upstream does not classify authenticated sessions (`spam_classify`
+    /// returns `Disabled`), so an account sending spam from its own mailbox is
+    /// never scored. The result only goes to the DATA-stage MTA hook
+    /// (`serverHeaders` `X-Spam-Score`, `X-Spam-Tags`); no headers are added,
+    /// nothing is trained and recipients' spam flags are untouched.
+    ///
+    /// The score counts content tags only; tags about the sending infrastructure
+    /// are listed in `X-Spam-Tags` but not added up.
+    pub async fn spam_score_outgoing<'x>(
+        &'x self,
+        message: &'x Message<'x>,
+        dkim_result: &'x [DkimOutput<'x>],
+        dkim2_result: Option<&'x Dkim2Output<'x>>,
+        arc_result: Option<&'x ArcOutput<'x>>,
+        dmarc_result: Option<&'x DmarcResult>,
+        dmarc_policy: Option<&'x Policy>,
+    ) -> Option<(f32, String)> {
+        let texts = MessageTexts::new(message, self.server.core.spam.text_limits);
+        self.server
+            .spam_score_outgoing_input(
+                self.build_spam_input(
+                    message,
+                    &texts,
+                    dkim_result,
+                    dkim2_result,
+                    arc_result,
+                    dmarc_result,
+                    dmarc_policy,
+                ),
+                &[],
+            )
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

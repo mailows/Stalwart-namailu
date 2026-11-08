@@ -33,7 +33,7 @@ use email::{
         delete::EmailDeletion,
         ingest::{
             EmailIngest, IngestEmail, IngestSource, SpamSamples, group::ThreadKey,
-            recheck::ThreadRecheck,
+            recheck::ThreadRecheck, strip_untrusted_ingest_headers,
         },
         messagedata::{KeywordDiff, PendingMessageData, merge_keywords},
     },
@@ -991,6 +991,10 @@ impl EmailSet for Server {
             // Build message
             let mut raw_message = Vec::with_capacity((4 * size_attachments / 3) + 1024);
             builder.write_to(&mut raw_message).unwrap_or_default();
+            // naMailu fork: server-owned verdict headers cannot come from the client.
+            if let Some(sanitized) = strip_untrusted_ingest_headers(&raw_message) {
+                raw_message = sanitized;
+            }
 
             let message = match MessageParser::new().parse(&raw_message) {
                 Some(message) => {

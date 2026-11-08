@@ -22,7 +22,7 @@ use common::{
 use email::{
     cache::{MessageCacheFetch, mailbox::MailboxCacheAccess},
     mailbox::JUNK_ID,
-    message::ingest::{group::ThreadKey, recheck::ThreadRecheck},
+    message::ingest::{group::ThreadKey, recheck::ThreadRecheck, strip_untrusted_ingest_headers},
 };
 use http_proto::HttpSessionData;
 use jmap_proto::{
@@ -189,7 +189,19 @@ impl EmailImport for Server {
             };
 
             let is_stored = blob.stored_len(&blob_id) == Some(blob.bytes.len());
-            let raw_message = blob.bytes;
+            let mut raw_message = blob.bytes;
+
+            // naMailu fork: a JMAP client can upload arbitrary RFC 5322 headers.
+            // Strip server-owned verdicts before parsing and storing; the stored
+            // blob then no longer matches the uploaded one.
+            let is_stored = match strip_untrusted_ingest_headers(&raw_message) {
+                Some(sanitized) => {
+                    let len = raw_message.len();
+                    raw_message.replace_prefix(len, &sanitized)?;
+                    false
+                }
+                None => is_stored,
+            };
 
             // Import message
             let parsed = MessageParser::new().parse(&raw_message);

@@ -16,6 +16,7 @@ use email::message::ingest::{
     IngestEmail, IngestSource, IngestedEmail,
     group::{IngestGroup, ThreadKey},
     recheck::ThreadRecheck,
+    strip_untrusted_ingest_headers,
 };
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
@@ -185,7 +186,10 @@ impl<T: SessionStream> SessionData<T> {
         let grouping = arguments.messages.len() > 1;
         let mut group = IngestGroup::with_max_emails(arguments.messages.len());
         for message in arguments.messages {
-            let parsed = MessageParser::new().parse(&message.message);
+            // naMailu fork: server-owned verdict headers cannot come from the client.
+            let sanitized = strip_untrusted_ingest_headers(&message.message);
+            let raw_message: &[u8] = sanitized.as_deref().unwrap_or(&message.message);
+            let parsed = MessageParser::new().parse(raw_message);
             if let Some(parsed) = &parsed
                 && let Err(err) = limits.validate_header_section(parsed)
             {
@@ -208,7 +212,7 @@ impl<T: SessionStream> SessionData<T> {
                 Some(parsed) if grouping => ThreadKey::new(parsed),
                 _ => ThreadKey::default(),
             };
-            if group.must_flush_before(message.message.len()) {
+            if group.must_flush_before(raw_message.len()) {
                 match group.flush(&self.server).await {
                     Ok(emails) => appended(
                         emails,
@@ -225,7 +229,7 @@ impl<T: SessionStream> SessionData<T> {
                 .ingest(
                     &self.server,
                     IngestEmail {
-                        raw_message: &message.message,
+                        raw_message,
                         message: parsed.as_ref(),
                         blob_hash: None,
                         access_token: &access_token,

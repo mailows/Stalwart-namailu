@@ -1836,6 +1836,7 @@ dependencies = [
  "registry",
  "rkyv",
  "serde_json",
+ "sha2 0.11.1",
  "sieve-rs",
  "store",
  "text-extract",

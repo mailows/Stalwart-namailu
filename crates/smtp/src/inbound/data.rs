@@ -607,6 +607,8 @@ impl<T: SessionStream> Session<T> {
         // Run SPAM filter
         let mut train_spam = None;
         let mut spam_result = None;
+        self.data.spam_score = None;
+        self.data.spam_tags = None;
         if self.server.core.spam.enabled && self.eval_if(&dc.spam_filter).await.unwrap_or(true) {
             match self
                 .spam_classify(
@@ -630,6 +632,8 @@ impl<T: SessionStream> Session<T> {
                     });
                     let scores = &self.server.core.spam.scores;
                     spam_result = Some((score.score, scores.spam_percentage(score.score)));
+                    // naMailu fork: the score also goes to the DATA hook.
+                    self.data.spam_score = Some(score.score);
 
                     // Add scores for local recipients
                     for (user_score, recipient) in
@@ -666,6 +670,26 @@ impl<T: SessionStream> Session<T> {
                 }
                 SpamFilterAction::Disabled => {}
             }
+        }
+
+        // naMailu fork: authenticated sessions are not classified above; score them
+        // for the MTA hook only (see `spam_score_outgoing`).
+        if self.is_authenticated()
+            && self.server.core.spam.enabled
+            && self.eval_if(&dc.spam_filter).await.unwrap_or(true)
+            && let Some((score, tags)) = self
+                .spam_score_outgoing(
+                    &parsed_message,
+                    &dkim_output,
+                    dkim2_output.as_ref(),
+                    (&arc_output).into(),
+                    dmarc_result.as_ref(),
+                    dmarc_policy.as_ref(),
+                )
+                .await
+        {
+            self.data.spam_score = Some(score);
+            self.data.spam_tags = Some(tags);
         }
 
         // Run Milter filters

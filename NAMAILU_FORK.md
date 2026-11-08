@@ -18,9 +18,9 @@ rewrite and none of them applies as a patch. Plan and status:
 | 7 | outgoing Sieve (redirect/vacation) asks the RCPT hook, bound to the account | todo | |
 | 8 | delayed send with a release-time quota gate | todo | |
 | 9 | DATA hook on the exact queued bytes, only verdict headers after it | todo | |
-| 10 | spam score for the hook also for authenticated mail (`X-Spam-Score`) | todo | |
+| 10 | spam score for the hook also for authenticated mail (`X-Spam-Score`, `X-Spam-Tags`) | ported | `crates/spam-filter/src/analysis/outgoing.rs`, `crates/smtp/src/inbound/{spam,data}.rs`, `crates/smtp/src/inbound/hooks/message.rs` |
 | 11 | `verifiedEnvelopeSender`, `dkimVerifiedFrom` in the hook context | ported | `crates/smtp/src/{core/mod,inbound/{mail,session,data}}.rs`, `crates/smtp/src/inbound/hooks/{mod,message}.rs` |
-| 12 | scan + strip verdict headers on JMAP import/set and IMAP APPEND | todo | |
+| 12 | scan + strip verdict headers on JMAP import/set and IMAP APPEND | ported | `crates/email/src/message/ingest.rs`, `crates/jmap/src/email/{import,set}.rs`, `crates/imap/src/op/append.rs` |
 | 13 | Google FBL: server-owned, DKIM-signed Feedback-ID | todo | |
 
 ## Unified password (1, 3, 5)
@@ -45,6 +45,30 @@ failure only logs a warning and the first use retries, at most one attempt per
 2 s while the provider is down. A misconfiguration (issuer mismatch, missing
 introspection endpoint) still fails the directory at startup. The HTTP timeout
 towards the provider is 10 s instead of 30 s.
+
+## Spam score for the hook (10)
+
+Upstream does not classify authenticated sessions. The fork scores them for the
+DATA-stage MTA hook only: `serverHeaders` carry `X-Spam-Score` (all mail that was
+scored) and `X-Spam-Tags` (authenticated mail). Nothing is added to the message,
+nothing is trained and recipients' spam flags are untouched; the hook decides.
+For authenticated mail only content tags are added up; tags about the sending
+infrastructure (SPF/DKIM/DMARC/ARC, RBL, rDNS, HELO, Received, IP/ASN, AUTH) are
+listed with `*` but not counted, because they describe our own server.
+
+## Client ingest (12)
+
+JMAP `Email/import`, `Email/set` and IMAP `APPEND` store bytes the client supplies
+and bypass the SMTP DATA hook that writes `X-Namailu-Scan-*`.
+`strip_untrusted_ingest_headers` removes `X-Namailu-*`, `X-Spam-*`,
+`Authentication-Results` and `Received-SPF` (with folded continuation lines, bare
+CR line ends and space before the colon) on all three paths. Before storing,
+`email_ingest_into` sends the bytes to the scanner (`<hook base>/scan-message`,
+the single HTTPS `/mta-hook` with its headers and client). The verdict must name
+`engine=clamav` and the SHA-256 of exactly these bytes; `malware`, `suspicious`
+and `limit` are refused (550), anything else that is not clean, a missing scanner
+or a network error is a temporary failure (451). An imported blob that was
+stripped is stored as a new blob.
 
 ## Build
 

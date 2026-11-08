@@ -581,6 +581,8 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.spf_mail_from = None;
         self.data.spf_checked_sender = None;
         self.data.dkim_verified_from = None;
+        self.data.spam_score = None;
+        self.data.spam_tags = None;
         self.data.rcpt_to.clear();
         self.data.message = Vec::with_capacity(0);
         self.data.message_memory = None;
