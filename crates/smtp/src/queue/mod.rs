@@ -168,6 +168,13 @@ pub enum Metadata {
         value: Box<[u8]>,
         id: u64,
     },
+    /// naMailu fork (#8): login and submission time of a held (FUTURERELEASE)
+    /// message (`login\0started_at_us`, `id` = account id + 1). The release gate
+    /// asks the RCPT hook for this account before delivery.
+    ReleaseAccount {
+        value: Box<[u8]>,
+        id: u64,
+    },
 }
 
 const _: () = assert!(size_of::<Metadata>() == 32);
@@ -233,6 +240,10 @@ pub const RCPT_SIEVE_UNCHECKED: u64 = 1 << 40;
 /// naMailu fork (#7): the final DATA scan of this Sieve copy has not passed yet.
 /// Kept per recipient because a multi-queue save merges only recipients.
 pub const RCPT_SIEVE_SCAN_PENDING: u64 = 1 << 42;
+/// naMailu fork (#8): recipient of a held message whose sending quota has not been
+/// charged yet; the queue asks the RCPT hook when it releases the message
+/// (`outbound/release_gate.rs`). Cleared once the hook allows it.
+pub const RCPT_RELEASE_UNCHECKED: u64 = 1 << 41;
 
 pub const RCPT_SPAM_SHIFT: u64 = 56;
 pub const RCPT_SPAM_MASK: u64 = 0xff << RCPT_SPAM_SHIFT;

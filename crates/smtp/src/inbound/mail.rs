@@ -361,6 +361,30 @@ impl<T: SessionStream> Session<T> {
                     .write(b"501 5.5.4 Only one of HOLDFOR or HOLDUNTIL may be specified.\r\n")
                     .await;
             }
+            // naMailu fork (#8): a held message is checked again when the queue
+            // releases it (`outbound/release_gate.rs`), against the account that
+            // submitted it. Without a login or an RCPT hook there is nobody to ask,
+            // so the hold is refused whatever the registry expression says.
+            if self.authenticated_as().is_none_or(str::is_empty)
+                || !self
+                    .server
+                    .core
+                    .smtp
+                    .session
+                    .hooks
+                    .iter()
+                    .any(|hook| hook.run_on_stage.contains(&Stage::Rcpt))
+            {
+                trc::event!(
+                    Smtp(SmtpEvent::FutureReleaseInvalid),
+                    SpanId = self.data.session_id,
+                    Details = "FUTURERELEASE requires an authenticated session and an RCPT hook",
+                );
+                self.data.mail_from = None;
+                return self
+                    .write(b"501 5.5.4 FUTURERELEASE is not available for this session.\r\n")
+                    .await;
+            }
             if let Some(max_hold) = self.eval_if::<Duration>(&config.future_release).await {
                 let max_hold = max_hold.as_secs();
                 let now = SystemTime::now()
@@ -383,6 +407,9 @@ impl<T: SessionStream> Session<T> {
                 };
                 if hold_for <= max_hold {
                     self.data.future_release = hold_for;
+                    self.data.future_release_started_at_us = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_micros().try_into().unwrap_or(0));
                 } else {
                     trc::event!(
                         Smtp(SmtpEvent::FutureReleaseInvalid),

@@ -29,6 +29,8 @@ pub mod lookup;
 pub mod mta_sts;
 // naMailu fork (#7): queued Sieve copies are rechecked before delivery
 pub mod scan_pending;
+// naMailu fork (#8): held messages charge the sending quota at release
+pub mod release_gate;
 pub mod session;
 
 pub(super) enum DeliveryResult {

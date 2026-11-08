@@ -246,6 +246,10 @@ impl QueuedMessage {
             }
         }
 
+        // naMailu fork (#8): a held (FUTURERELEASE) message charges its sending quota
+        // now. Refused recipients fail (DSN later), waiting ones are rescheduled.
+        message.release_gate(&server).await;
+
         // naMailu fork (#7): a generated Sieve copy is rechecked against the account's
         // outgoing policy (and scanned if that is still pending) before every attempt.
         if message.scan_pending_gate(&server).await {

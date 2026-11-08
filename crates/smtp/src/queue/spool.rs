@@ -979,7 +979,8 @@ impl MessageWrapper {
                 }
                 Metadata::Headers { .. }
                 | Metadata::Submission { .. }
-                | Metadata::SieveAccount { .. } => {}
+                | Metadata::SieveAccount { .. }
+                | Metadata::ReleaseAccount { .. } => {}
             }
         }
 
@@ -1143,7 +1144,8 @@ impl MessageWrapper {
                 }
                 Metadata::Headers { .. }
                 | Metadata::Submission { .. }
-                | Metadata::SieveAccount { .. } => {}
+                | Metadata::SieveAccount { .. }
+                | Metadata::ReleaseAccount { .. } => {}
             }
         }
 

@@ -9,7 +9,8 @@ use crate::{
     core::{Session, SessionAddress, SessionData, State},
     inbound::{dkim::DkimSign, milter::Modification, session::INSUFFICIENT_STORAGE},
     queue::{
-        self, Message, MessageSource, MessageWrapper, Metadata, QueueEnvelope, RCPT_SPAM_MASK,
+        self, Message, MessageSource, MessageWrapper, Metadata, QueueEnvelope,
+        RCPT_RELEASE_UNCHECKED, RCPT_SPAM_MASK,
         dsn::PropagateDsn,
         quota::HasQueueQuota,
         rcpt_spam_flag,
@@ -1054,6 +1055,27 @@ impl<T: SessionStream> Session<T> {
         };
         let dkim2_verified = dkim2_output.as_ref().or(dkim2_proof.as_ref());
         let quotas = self.server.queue_quotas(&message).await;
+        // naMailu fork (#8): remember who submitted a held message; the release gate
+        // charges this account's quota when the message leaves the queue. Bound to the
+        // principal and the submission time: a purged principal may be adopted by a
+        // new mailbox at the same address. `id = account_id + 1`, zero = no binding.
+        let release_account = if self.data.future_release != 0 {
+            self.data
+                .authenticated_as
+                .as_ref()
+                .map(|account| Metadata::ReleaseAccount {
+                    value: format!(
+                        "{}\0{}",
+                        account.account.name(),
+                        self.data.future_release_started_at_us
+                    )
+                    .into_bytes()
+                    .into_boxed_slice(),
+                    id: u64::from(account.account_id) + 1,
+                })
+        } else {
+            None
+        };
         let queue_id = message.queue_id;
         match message
             .queue(
@@ -1066,7 +1088,8 @@ impl<T: SessionStream> Session<T> {
                     .with_dkim2_verified(dkim2_verified)
                     .with_exploded(sieve_redirected)
                     .with_quotas(quotas)
-                    .with_metadata(origin.metadata()),
+                    .with_metadata(origin.metadata())
+                    .with_metadata(release_account),
             )
             .await
         {
@@ -1143,6 +1166,14 @@ impl<T: SessionStream> Session<T> {
                     )
                     .with_orcpt(rcpt.dsn_info.map(|v| v.into_boxed_str())),
             );
+
+            // naMailu fork (#8): the sending quota of a held message is charged when the
+            // queue releases it, not now (`outbound/release_gate.rs`).
+            if future_release != 0
+                && let Some(recipient) = message.recipients.last_mut()
+            {
+                recipient.flags |= RCPT_RELEASE_UNCHECKED;
+            }
 
             let envelope = QueueEnvelope::new(&message, message.recipients.last().unwrap());
 

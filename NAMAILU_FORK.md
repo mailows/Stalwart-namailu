@@ -1,4 +1,4 @@
-# Namailu fork of Stalwart 1.0.3 (port in progress)
+# Namailu fork of Stalwart 1.0.3
 
 Branch `namailu-1.0` on top of upstream `v1.0.3`. It carries the changes of the
 0.16.26 fork (`namailu-unified-password`, `bad1ab44a`) ported by hand: 1.0 is a
@@ -16,7 +16,7 @@ rewrite and none of them applies as a patch. Plan and status:
 | 5 | authentication backend error = temporary failure (IMAP `[UNAVAILABLE]`, POP3 `[SYS/TEMP]`) | ported | `crates/{imap,pop3}/src/op/authenticate.rs` |
 | 6 | default calendar / address book names without the account name | ported | `crates/groupware/src/cache/mod.rs` |
 | 7 | outgoing Sieve (redirect/vacation/notify) asks the RCPT hook, bound to the account | ported | `crates/email/src/sieve/{outbound_hook,outgoing_spam,ingest,mod}.rs`, `crates/email/src/message/delivery.rs`, `crates/smtp/src/outbound/{scan_pending,local,delivery,mod}.rs`, `crates/smtp/src/queue/{mod,spool}.rs` |
-| 8 | delayed send with a release-time quota gate | todo | |
+| 8 | delayed send with a release-time quota gate | ported | `crates/smtp/src/outbound/{release_gate,delivery,mod}.rs`, `crates/smtp/src/inbound/{mail,data,session}.rs`, `crates/smtp/src/inbound/hooks/{mod,message}.rs`, `crates/smtp/src/core/mod.rs`, `crates/smtp/src/queue/{mod,spool}.rs` |
 | 9 | DATA hook on the exact queued bytes, only verdict headers after it | ported | `crates/smtp/src/inbound/data.rs`, `crates/smtp/src/inbound/hooks/{mod,message}.rs` |
 | 10 | spam score for the hook also for authenticated mail (`X-Spam-Score`, `X-Spam-Tags`) | ported | `crates/spam-filter/src/analysis/outgoing.rs`, `crates/smtp/src/inbound/{spam,data}.rs`, `crates/smtp/src/inbound/hooks/message.rs` |
 | 11 | `verifiedEnvelopeSender`, `dkimVerifiedFrom` in the hook context | ported | `crates/smtp/src/{core/mod,inbound/{mail,session,data}}.rs`, `crates/smtp/src/inbound/hooks/{mod,message}.rs` |
@@ -108,6 +108,28 @@ attempt `scan_pending_gate` checks each due recipient again (`check`, or
 `reserve` when the first answer was lost), scans when still pending and
 reschedules on an outage. A copy without the binding is held until it expires.
 An alias that expands to other addresses needs its own reservation in the queue.
+
+## Delayed send charges the quota at release (8)
+
+A hook that charges per-account quota at RCPT would charge a held message
+(`HOLDFOR`/`HOLDUNTIL`, JMAP `EmailSubmission` with a send time, which 1.0 also
+submits through a local SMTP session) when it is submitted, although it leaves days
+later: a client could stockpile quota into one release window, and a message held
+before a suspension would still go out.
+
+- A hold needs an authenticated session and an RCPT-stage hook, otherwise `MAIL
+  FROM` answers `501 5.5.4`.
+- RCPT and DATA hook calls of a held submission carry `context.futureRelease =
+  "hold"` (check, do not charge). Every recipient is queued with
+  `RCPT_RELEASE_UNCHECKED` and `Metadata::ReleaseAccount` stores
+  `login\0started_at_us` with `id = account id + 1`.
+- When such a recipient is due, `release_gate` asks the RCPT hook for that login
+  with `context.futureRelease = "release"`, `releaseAccountId`,
+  `releaseQueuedAtUs`, `releaseQueueId` and the recipients released so far.
+  `accept` clears the flag; a 4xx reject, a timeout (10 s), an unknown answer or a
+  missing hook waits on the queue retry intervals with the submission expiry kept;
+  any other reject fails the recipient with the hook's message (DSN).
+  Entries without a complete binding wait for operator review.
 
 ## Google Feedback Loop header (13)
 
