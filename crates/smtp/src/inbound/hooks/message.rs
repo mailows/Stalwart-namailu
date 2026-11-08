@@ -23,6 +23,54 @@ use mail_auth::AuthenticatedMessage;
 use std::time::Instant;
 use trc::MtaHookEvent;
 
+/// naMailu fork: attest only the non-null envelope actually evaluated by MAIL FROM
+/// SPF. A later trusted filter rewrite cannot relabel an earlier passing result.
+fn verified_envelope_sender(
+    stage: Stage,
+    spf_result: Option<mail_auth::SpfResult>,
+    checked_sender: Option<&str>,
+    current_sender: Option<&str>,
+) -> Option<String> {
+    let current_sender = current_sender?;
+    (stage == Stage::Data
+        && spf_result == Some(mail_auth::SpfResult::Pass)
+        && !current_sender.is_empty()
+        && checked_sender == Some(current_sender))
+    .then(|| current_sender.to_owned())
+}
+
+/// naMailu fork: the single header From is DKIM-verified when a passing signature
+/// by its domain (or a parent domain) covers the From header and has no `l=`
+/// limit. Several From addresses never qualify. Domain authority, not a person.
+pub(crate) fn dkim_verified_from(
+    froms: &[String],
+    dkim: &[mail_auth::DkimOutput<'_>],
+) -> Option<String> {
+    let [from] = froms else { return None };
+    dkim.iter()
+        .any(|output| {
+            matches!(output.result(), mail_auth::DkimResult::Pass)
+                && output
+                    .signature()
+                    .is_some_and(|s| signature_vouches_for(from, &s.d, s.l, &s.h))
+        })
+        .then(|| from.clone())
+}
+
+fn signature_vouches_for(from: &str, d: &str, l: u64, signed_headers: &[String]) -> bool {
+    let Some((_, domain)) = from.rsplit_once('@') else {
+        return false;
+    };
+    let d = d.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.trim_end_matches('.');
+    !d.is_empty()
+        && l == 0
+        && signed_headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case("from"))
+        && (domain == d || domain.ends_with(&format!(".{d}")))
+}
+
 impl<T: SessionStream> Session<T> {
     pub async fn run_mta_hooks(
         &self,
@@ -188,6 +236,20 @@ impl<T: SessionStream> Session<T> {
         let (tls_version, tls_cipher) = self.stream.tls_version_and_cipher();
         let request = Request {
             context: Context {
+                verified_envelope_sender: verified_envelope_sender(
+                    stage,
+                    self.data.spf_mail_from.as_ref().map(|spf| spf.result()),
+                    self.data.spf_checked_sender.as_deref(),
+                    self.data
+                        .mail_from
+                        .as_ref()
+                        .map(|from| from.address_lcase.as_str()),
+                ),
+                dkim_verified_from: if stage == Stage::Data {
+                    self.data.dkim_verified_from.clone()
+                } else {
+                    None
+                },
                 stage: stage.into(),
                 client: Client {
                     ip: self.data.remote_ip_str.clone(),
@@ -273,4 +335,120 @@ fn flatten_parameters(parameters: AHashMap<String, Option<String>>) -> String {
     }
 
     arguments
+}
+
+#[cfg(test)]
+mod namailu_tests {
+    use super::{Stage, signature_vouches_for, verified_envelope_sender};
+    use mail_auth::SpfResult;
+
+    #[test]
+    fn aligned_signature_covering_from_without_length_limit() {
+        let h = vec!["From".to_string(), "Subject".to_string()];
+        assert!(signature_vouches_for(
+            "partner@example.test",
+            "example.test",
+            0,
+            &h
+        ));
+        assert!(signature_vouches_for(
+            "partner@mail.example.test",
+            "example.test",
+            0,
+            &h
+        ));
+        assert!(signature_vouches_for(
+            "partner@example.test",
+            "EXAMPLE.test.",
+            0,
+            &h
+        ));
+        // unrelated or sibling signer, body length limit, From not signed
+        assert!(!signature_vouches_for(
+            "partner@example.test",
+            "other.test",
+            0,
+            &h
+        ));
+        assert!(!signature_vouches_for(
+            "partner@example.test",
+            "mail.example.test",
+            0,
+            &h
+        ));
+        assert!(!signature_vouches_for(
+            "partner@badexample.test",
+            "example.test",
+            0,
+            &h
+        ));
+        assert!(!signature_vouches_for(
+            "partner@example.test",
+            "example.test",
+            120,
+            &h
+        ));
+        assert!(!signature_vouches_for(
+            "partner@example.test",
+            "example.test",
+            0,
+            &["Subject".to_string()]
+        ));
+        assert!(!signature_vouches_for("partner@example.test", "", 0, &h));
+    }
+
+    #[test]
+    fn data_requires_passing_spf_bound_to_exact_original_identity() {
+        let sender = "partner@example.test";
+        assert_eq!(
+            verified_envelope_sender(
+                Stage::Data,
+                Some(SpfResult::Pass),
+                Some(sender),
+                Some(sender)
+            ),
+            Some(sender.to_owned())
+        );
+
+        for (stage, result, checked, current) in [
+            (
+                Stage::Rcpt,
+                Some(SpfResult::Pass),
+                Some(sender),
+                Some(sender),
+            ),
+            (Stage::Data, None, Some(sender), Some(sender)),
+            (
+                Stage::Data,
+                Some(SpfResult::Fail),
+                Some(sender),
+                Some(sender),
+            ),
+            (
+                Stage::Data,
+                Some(SpfResult::None),
+                Some(sender),
+                Some(sender),
+            ),
+            (
+                Stage::Data,
+                Some(SpfResult::Pass),
+                Some(sender),
+                Some("other@example.test"),
+            ),
+            (
+                Stage::Data,
+                Some(SpfResult::Pass),
+                Some(sender),
+                Some("partner@other.test"),
+            ),
+            // Missing checked identity (including reset) never inherits proof.
+            (Stage::Data, Some(SpfResult::Pass), None, Some(sender)),
+            (Stage::Data, None, None, None),
+            (Stage::Data, Some(SpfResult::Pass), Some(sender), None),
+            (Stage::Data, Some(SpfResult::Pass), Some(""), Some("")),
+        ] {
+            assert!(verified_envelope_sender(stage, result, checked, current).is_none());
+        }
+    }
 }

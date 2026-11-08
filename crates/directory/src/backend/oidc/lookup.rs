@@ -39,14 +39,95 @@ const NON_ACCESS_MARKERS: [(&str, &str); 12] = [
 ];
 
 impl OpenIdDirectory {
-    pub async fn authenticate(&self, _credentials: &Credentials) -> trc::Result<Account> {
-        Err(AuthEvent::Error
-            .into_err()
-            .reason("Unsupported credentials type for OIDC backend"))
+    pub async fn authenticate(&self, credentials: &Credentials) -> trc::Result<Account> {
+        match credentials {
+            Credentials::Basic {
+                username, secret, ..
+            } => self
+                .authenticate_basic(username, secret)
+                .await
+                .map_err(|err| match err {
+                    OidcError::AuthorizationFailed(reason) => {
+                        AuthEvent::Failed.into_err().reason(reason)
+                    }
+                    err => AuthEvent::Error.into_err().reason(err),
+                }),
+            Credentials::Bearer { .. } => Err(AuthEvent::Error
+                .into_err()
+                .reason("Unsupported credentials type for OIDC backend")),
+        }
+    }
+
+    /// naMailu fork: verify a mail-protocol password against the provider's
+    /// private password oracle (`password_verification_endpoint`). The provider
+    /// stays the only password authority: no token, profile or hash comes back.
+    /// App passwords are handled earlier in `Server::authenticate_basic` and never
+    /// reach this endpoint.
+    ///
+    /// 204 = valid; 401/403/429 = invalid credentials; anything else, a network
+    /// error or a missing service token = provider error, which the protocols
+    /// answer as a temporary failure (a client must not drop the stored password
+    /// because the provider was briefly down).
+    async fn authenticate_basic(&self, username: &str, secret: &str) -> Result<Account, OidcError> {
+        let discovered = self.discovered().await?;
+        let endpoint = discovered
+            .discovery
+            .document
+            .password_verification_endpoint
+            .as_deref()
+            .ok_or_else(|| OidcError::AuthorizationFailed("Invalid credentials".to_string()))?;
+        let token = self.basic_auth_token.as_deref().ok_or_else(|| {
+            OidcError::Provider(
+                "OIDC password verification endpoint is advertised but \
+                 STALWART_OIDC_BASIC_AUTH_TOKEN is not configured"
+                    .to_string(),
+            )
+        })?;
+        let username = username.trim().to_ascii_lowercase();
+        if username.is_empty() || username.len() > 320 || secret.is_empty() || secret.len() > 1024 {
+            return Err(OidcError::AuthorizationFailed(
+                "Invalid credentials".to_string(),
+            ));
+        }
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "username": username,
+            "password": secret,
+        }))
+        .map_err(|err| {
+            OidcError::Provider(format!(
+                "Password verification request serialization failed: {err}"
+            ))
+        })?;
+        let status = self
+            .http
+            .request(Method::POST, endpoint)
+            .map_err(|err| OidcError::Config(format!("Invalid password verification URL: {err}")))?
+            .bearer_auth(token)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|err| {
+                OidcError::Network(format!("Password verification request failed: {err}"))
+            })?
+            .status();
+
+        password_status(status).map(|_| Account {
+            email: username,
+            email_aliases: Vec::new(),
+            secret: None,
+            groups: None,
+            description: None,
+        })
     }
 
     pub fn accepts_issuer(&self, issuer: &str) -> bool {
-        self.issuers.iter().any(|accepted| accepted == issuer)
+        match self.discovered.read().as_ref() {
+            Some(discovered) => discovered.issuers.iter().any(|accepted| accepted == issuer),
+            // naMailu fork: before the first discovery, match the configured issuer.
+            None => issuer.trim_end_matches('/') == self.config.issuer_url.trim_end_matches('/'),
+        }
     }
 
     pub async fn authenticate_token(
@@ -89,6 +170,7 @@ impl OpenIdDirectory {
             ));
         }
 
+        let discovered = self.discovered().await?;
         let kid = header.kid.as_deref();
         let keys = self.signing_keys(kid).await?;
         let mut last_err = None;
@@ -134,7 +216,7 @@ impl OpenIdDirectory {
             || missing_username
             || is_claim_missing(&claims, self.config.claim_name.as_deref())
             || is_claim_missing(&claims, self.config.claim_groups.as_deref()))
-            && let Some(endpoint) = self.discovery.document.userinfo_endpoint.as_deref()
+            && let Some(endpoint) = discovered.discovery.document.userinfo_endpoint.as_deref()
         {
             match self.fetch_userinfo(endpoint, token).await {
                 Ok(Value::Object(userinfo)) => {
@@ -176,7 +258,8 @@ impl OpenIdDirectory {
             )),
             OpaqueValidation::UserInfo => {
                 let access = self.token_access(None, ExternalScopes::NONE, ctx)?;
-                let endpoint = self
+                let discovered = self.discovered().await?;
+                let endpoint = discovered
                     .discovery
                     .document
                     .userinfo_endpoint
@@ -202,7 +285,8 @@ impl OpenIdDirectory {
         auth: &IntrospectionAuth,
         ctx: &TokenContext<'_>,
     ) -> Result<ExternalToken, OidcError> {
-        let endpoint = self
+        let discovered = self.discovered().await?;
+        let endpoint = discovered
             .discovery
             .document
             .introspection_endpoint
@@ -451,6 +535,24 @@ fn check_token_type(
     }
 }
 
+/// naMailu fork: mapping of the password oracle's answer.
+fn password_status(status: StatusCode) -> Result<(), OidcError> {
+    if status == StatusCode::NO_CONTENT {
+        Ok(())
+    } else if matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+    ) {
+        Err(OidcError::AuthorizationFailed(
+            "Invalid credentials".to_string(),
+        ))
+    } else {
+        Err(OidcError::Provider(format!(
+            "Password verification endpoint returned HTTP {status}"
+        )))
+    }
+}
+
 fn claim_equals(claims: &Value, name: &str, value: &str) -> bool {
     claims
         .get(name)
@@ -520,6 +622,114 @@ fn extract_string_list(value: &Value) -> Option<Vec<String>> {
 
 fn is_claim_missing(claims: &Value, claim: Option<&str>) -> bool {
     claim.is_some_and(|claim| claims.get(claim).is_none_or(Value::is_null))
+}
+
+#[cfg(test)]
+mod namailu_tests {
+    use super::password_status;
+    use crate::{
+        Credentials,
+        backend::oidc::{
+            OidcConfig, OidcError, OpaqueValidation, OpenIdDirectory,
+            config::check_password_endpoint,
+        },
+    };
+    use registry::schema::enums::OidcUnscopedTokenPolicy;
+    use reqwest::StatusCode;
+    use utils::outbound::OutboundPolicy;
+
+    #[test]
+    fn password_oracle_status_mapping() {
+        assert!(password_status(StatusCode::NO_CONTENT).is_ok());
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert!(matches!(
+                password_status(status),
+                Err(OidcError::AuthorizationFailed(_))
+            ));
+        }
+        // An outage must never look like a wrong password.
+        for status in [
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(matches!(
+                password_status(status),
+                Err(OidcError::Provider(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn password_endpoint_must_be_https_on_issuer_host() {
+        let issuer = "https://portal.example.test";
+        assert!(
+            check_password_endpoint("https://portal.example.test/idp/mail-password", issuer)
+                .is_ok()
+        );
+        for endpoint in [
+            "http://portal.example.test/idp/mail-password",
+            "https://evil.example.test/idp/mail-password",
+            "https://user:pass@portal.example.test/idp/mail-password",
+            "not a url",
+        ] {
+            assert!(
+                check_password_endpoint(endpoint, issuer).is_err(),
+                "{endpoint}"
+            );
+        }
+    }
+
+    fn unreachable_config() -> OidcConfig {
+        OidcConfig {
+            // Nothing listens on port 9 of the loopback address.
+            issuer_url: "https://127.0.0.1:9".to_string(),
+            claim_username: "email".to_string(),
+            claim_name: None,
+            claim_groups: None,
+            username_domain: None,
+            allow_invalid_certs: false,
+            outbound_policy: OutboundPolicy::Trusted,
+            accepted_audiences: Box::new([]),
+            opaque_validation: OpaqueValidation::Reject,
+            unscoped_tokens: OidcUnscopedTokenPolicy::Reject,
+            skip_audience_validation: false,
+            allow_id_token_claims: false,
+            lenient_issuer_match: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_provider_does_not_fail_the_directory() {
+        let directory = OpenIdDirectory::new(unreachable_config())
+            .await
+            .expect("an unreachable provider must not fail the directory");
+        // Before the first discovery the configured issuer is accepted.
+        assert!(directory.accepts_issuer("https://127.0.0.1:9/"));
+        assert!(!directory.accepts_issuer("https://other.example.test"));
+        assert!(directory.discovery().await.is_none());
+
+        // A password login during the outage is a temporary error, never a
+        // rejected credential (IMAP UNAVAILABLE, SMTP 454).
+        let err = directory
+            .authenticate(&Credentials::Basic {
+                username: "user@example.test".to_string(),
+                secret: "secret".to_string(),
+                mfa_token: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.matches(trc::EventType::Auth(trc::AuthEvent::Error)),
+            "{err:?}"
+        );
+    }
 }
 
 #[cfg(all(test, stalwart_tests))]

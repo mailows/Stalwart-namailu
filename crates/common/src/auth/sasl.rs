@@ -112,12 +112,8 @@ impl Server {
         credentials: Option<&Credentials>,
     ) -> Option<String> {
         if let Some(Credentials::Bearer { username, token }) = credentials
-            && let Ok(Some(discovery)) = self
-                .bearer_directory(username.as_deref(), token)
-                .await
-                .map(|directory| {
-                    directory.and_then(|directory| directory.oidc_discovery_document())
-                })
+            && let Ok(Some(directory)) = self.bearer_directory(username.as_deref(), token).await
+            && let Some(discovery) = directory.oidc_discovery_document().await
         {
             return Some(discovery.configuration_url().to_string());
         }

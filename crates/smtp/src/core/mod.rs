@@ -103,7 +103,13 @@ pub struct SessionData {
     pub iprev: Option<IprevOutput>,
     pub spf_ehlo: Option<SpfOutput>,
     pub spf_mail_from: Option<SpfOutput>,
+    /// naMailu fork: exact identity evaluated by MAIL FROM SPF; a later envelope
+    /// rewrite cannot relabel it (see `hooks::message::verified_envelope_sender`).
+    pub spf_checked_sender: Option<String>,
     pub dnsbl_error: Option<Vec<u8>>,
+    /// naMailu fork: the single header From covered by a passing, aligned DKIM
+    /// signature of this message (see `hooks::message::dkim_verified_from`).
+    pub dkim_verified_from: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -181,7 +187,9 @@ impl SessionData {
             iprev: None,
             spf_ehlo: None,
             spf_mail_from: None,
+            spf_checked_sender: None,
             dnsbl_error: None,
+            dkim_verified_from: None,
         }
     }
 }
@@ -318,7 +326,9 @@ impl SessionData {
             iprev: None,
             spf_ehlo: None,
             spf_mail_from: None,
+            spf_checked_sender: None,
             dnsbl_error: None,
+            dkim_verified_from: None,
         }
     }
 }

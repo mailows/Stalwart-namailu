@@ -244,12 +244,19 @@ impl Server {
                 .rsplit_once(':')
                 .map_or(authority, |(host, _)| host),
         };
-        Ok(self
-            .get_directory_for_host(host)
-            .await
-            .caused_by(trc::location!())?
-            .and_then(|directory| directory.oidc_discovery_document())
-            .map(|discovery| discovery.document.issuer.clone()))
+        Ok(
+            match self
+                .get_directory_for_host(host)
+                .await
+                .caused_by(trc::location!())?
+            {
+                Some(directory) => directory
+                    .oidc_discovery_document()
+                    .await
+                    .map(|discovery| discovery.document.issuer.clone()),
+                None => None,
+            },
+        )
     }
 
     async fn registered_oauth_client(

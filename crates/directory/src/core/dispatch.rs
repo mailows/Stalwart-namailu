@@ -10,6 +10,7 @@ use crate::{
     core::verifier::PasswordVerifier,
 };
 use registry::schema::enums::DirectoryType;
+use std::sync::Arc;
 use trc::AddContext;
 
 impl Directory {
@@ -75,9 +76,11 @@ impl Directory {
         }
     }
 
-    pub fn oidc_discovery_document(&self) -> Option<&OidcDiscovery> {
+    /// naMailu fork: discovery is fetched lazily; `None` also while the
+    /// provider is unreachable (the next call retries).
+    pub async fn oidc_discovery_document(&self) -> Option<Arc<OidcDiscovery>> {
         match &self {
-            Directory::OpenId(directory) => Some(&directory.discovery),
+            Directory::OpenId(directory) => directory.discovery().await,
             _ => None,
         }
     }

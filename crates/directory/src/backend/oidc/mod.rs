@@ -104,6 +104,11 @@ pub struct DiscoveryDocument {
     pub userinfo_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_session_endpoint: Option<String>,
+    /// naMailu fork: private extension for deployments that deliberately accept the
+    /// same primary password on legacy mail protocols. The endpoint returns no
+    /// profile or hash; it only verifies a username/password pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_verification_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,13 +301,33 @@ struct JwksState {
     max_age: Duration,
 }
 
+/// Discovery document and the issuer identifiers derived from it.
+pub(crate) struct Discovered {
+    pub discovery: Arc<OidcDiscovery>,
+    pub issuers: Box<[String]>,
+}
+
+/// naMailu fork: last failed discovery attempt, so that a provider outage does
+/// not turn every login into a new metadata round-trip.
+pub(crate) struct DiscoveryFailure {
+    pub at: Instant,
+    pub reason: String,
+}
+
 pub struct OpenIdDirectory {
     config: OidcConfig,
-    pub discovery: OidcDiscovery,
-    issuers: Box<[String]>,
+    /// naMailu fork: fetched lazily. The provider is another service of the same
+    /// deployment and may be down when the server starts; upstream then marks the
+    /// directory unavailable until the next reload. `None` until the first
+    /// successful fetch; read it through `OpenIdDirectory::discovered`.
+    discovered: RwLock<Option<Arc<Discovered>>>,
+    discovery_lock: tokio::sync::Mutex<Option<DiscoveryFailure>>,
     http: OutboundClient,
     jwks: RwLock<JwksState>,
     jwks_refresh: tokio::sync::Mutex<()>,
+    /// naMailu fork: service identity for `password_verification_endpoint`, from
+    /// `STALWART_OIDC_BASIC_AUTH_TOKEN`. Never logged, never in the registry.
+    basic_auth_token: Option<Box<str>>,
 }
 
 #[derive(Debug)]

@@ -424,7 +424,7 @@ impl Server {
                 .caused_by(trc::location!())?
             {
                 Some(directory) if directory.has_bearer_token_support() => {
-                    match directory.oidc_discovery_document() {
+                    match directory.oidc_discovery_document().await {
                         Some(discovery)
                             if discovery.conformance.serves_oauth_public(pacc.oauth_scopes) =>
                         {

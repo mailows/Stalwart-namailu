@@ -23,6 +23,16 @@ pub struct HttpAuthenticated {
     pub epoch: RevocationEpoch,
 }
 
+/// naMailu fork: upper bound for caching a verified Basic credential. Passwords
+/// of HUMAN accounts are owned by the external IdP, so a password change does not
+/// bump the account revision here; without this cap an old password kept working
+/// over HTTP (CalDAV, CardDAV, JMAP) for the whole OAuth token lifetime.
+const BASIC_AUTH_CACHE_TTL: u64 = 60;
+
+fn basic_cache_ttl(ttl: u64) -> u64 {
+    ttl.min(BASIC_AUTH_CACHE_TTL)
+}
+
 pub trait Authenticator: Sync + Send {
     fn authenticate_headers(
         &self,
@@ -68,7 +78,8 @@ impl Authenticator for Server {
                 self.inner.cache.http_auth.remove(token);
             }
 
-            let credentials = if mechanism.eq_ignore_ascii_case("basic") {
+            let is_basic = mechanism.eq_ignore_ascii_case("basic");
+            let credentials = if is_basic {
                 // Decode the base64 encoded credentials
                 decode_plain_auth(token).ok_or_else(|| {
                     trc::AuthEvent::Error
@@ -114,6 +125,11 @@ impl Authenticator for Server {
             let cache_ttl = expires_in.map_or(self.core.oauth.oauth_expiry_token, |expires_in| {
                 expires_in.min(self.core.oauth.oauth_expiry_token)
             });
+            let cache_ttl = if is_basic {
+                basic_cache_ttl(cache_ttl)
+            } else {
+                cache_ttl
+            };
             revocations.insert(
                 &self.inner.cache.http_auth,
                 token,
@@ -182,4 +198,15 @@ fn decode_plain_auth(token: &str) -> Option<Credentials> {
                 mfa_token: None,
             })
     })
+}
+
+#[cfg(test)]
+mod namailu_tests {
+    use super::*;
+
+    #[test]
+    fn basic_cache_is_capped_so_password_changes_apply_quickly() {
+        assert_eq!(basic_cache_ttl(3600), BASIC_AUTH_CACHE_TTL);
+        assert_eq!(basic_cache_ttl(10), 10);
+    }
 }

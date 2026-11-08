@@ -298,6 +298,14 @@ impl ParseHttp for Server {
                             .await;
                     }
                     ("session", &Method::GET) => {
+                        // naMailu fork: urls in the session document follow the host
+                        // the client used (see `session_base_url`), so brands are
+                        // not mixed up.
+                        let base_url = session_base_url(
+                            &self.core.network.http.url_https,
+                            session_public_hosts(),
+                            req.headers(),
+                        );
                         return if req.headers().contains_key(header::AUTHORIZATION) {
                             // Authenticate request
                             let HttpAuthenticated {
@@ -306,18 +314,12 @@ impl ParseHttp for Server {
                                 ..
                             } = self.authenticate_headers(&req, &session).await?;
 
-                            self.handle_session_resource(
-                                self.core.network.http.url_https.to_string(),
-                                &access_token,
-                            )
-                            .await
-                            .map(|s| s.into_http_response())
+                            self.handle_session_resource(base_url, &access_token)
+                                .await
+                                .map(|s| s.into_http_response())
                         } else {
-                            Ok(Session::new(
-                                &self.core.network.http.url_https,
-                                &self.core.jmap.capabilities,
-                            )
-                            .into_http_response())
+                            Ok(Session::new(base_url, &self.core.jmap.capabilities)
+                                .into_http_response())
                         };
                     }
                     (_, &Method::OPTIONS) => {
@@ -1133,6 +1135,119 @@ fn pacc_domain(host: &str) -> &str {
         .filter(|prefix| prefix.eq_ignore_ascii_case(PACC_HOST_PREFIX))
         .and_then(|_| host.get(PACC_HOST_PREFIX.len()..))
         .unwrap_or(host)
+}
+
+/// naMailu fork: public hosts (comma separated) that may be echoed back in a
+/// JMAP session document, e.g. `STALWART_PUBLIC_URL_HOSTS=namailu.cz,mailows.com`.
+///
+/// The session resource hands the client absolute urls (`apiUrl`, `uploadUrl`,
+/// `downloadUrl`, `eventSourceUrl`, websocket). Upstream builds them from the one
+/// configured public url, so a client that found the server on one brand's
+/// hostname is told to continue on the other brand's hostname. Everything else
+/// (OAuth metadata, issuer, web admin links) stays on the configured url.
+///
+/// Unset or empty keeps the upstream behaviour.
+fn session_public_hosts() -> &'static [String] {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HOSTS.get_or_init(|| {
+        parse_public_hosts(&std::env::var("STALWART_PUBLIC_URL_HOSTS").unwrap_or_default())
+    })
+}
+
+fn parse_public_hosts(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+        .collect()
+}
+
+/// naMailu fork: base url for the session document: the requested host when it
+/// is on the allowlist, otherwise the configured public url. The host comes from
+/// the request and is untrusted, so it is used only on an exact match; a spoofed
+/// `Host` must never put another hostname into the urls we hand out.
+fn session_base_url(default: &str, allowed: &[String], headers: &hyper::HeaderMap) -> String {
+    if !allowed.is_empty()
+        && let Some(value) = headers
+            .get("x-forwarded-host")
+            .or_else(|| headers.get(header::HOST))
+            .and_then(|value| value.to_str().ok())
+    {
+        // A chain of proxies appends to X-Forwarded-Host; the first entry is the
+        // host the client asked for.
+        let first = value.split(',').next().unwrap_or(value).trim();
+        // Strip the port, keep IPv6 literals (`[::1]`) intact.
+        let host = match first.rsplit_once(':') {
+            Some((host, port)) if !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()) => {
+                host
+            }
+            _ => first,
+        }
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+        if allowed.iter().any(|allowed_host| *allowed_host == host) {
+            return format!("https://{host}");
+        }
+    }
+    default.to_string()
+}
+
+#[cfg(test)]
+mod namailu_session_tests {
+    use super::{parse_public_hosts, session_base_url};
+    use hyper::{HeaderMap, header};
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn session_follows_allowlisted_host() {
+        let allowed = parse_public_hosts(" namailu.cz, Mailows.com. ,");
+        assert_eq!(allowed, ["namailu.cz", "mailows.com"]);
+        let default = "https://mail.namailu.cz";
+        assert_eq!(
+            session_base_url(default, &allowed, &headers(&[("host", "mailows.com:443")])),
+            "https://mailows.com"
+        );
+        assert_eq!(
+            session_base_url(
+                default,
+                &allowed,
+                &headers(&[
+                    ("x-forwarded-host", "namailu.cz, proxy.internal"),
+                    ("host", "x")
+                ])
+            ),
+            "https://namailu.cz"
+        );
+    }
+
+    #[test]
+    fn spoofed_or_unset_host_keeps_configured_url() {
+        let default = "https://mail.namailu.cz";
+        let allowed = parse_public_hosts("namailu.cz,mailows.com");
+        assert_eq!(
+            session_base_url(
+                default,
+                &allowed,
+                &headers(&[(header::HOST.as_str(), "evil.example")])
+            ),
+            default
+        );
+        assert_eq!(
+            session_base_url(default, &allowed, &headers(&[("host", "[::1]")])),
+            default
+        );
+        assert_eq!(
+            session_base_url(default, &[], &headers(&[("host", "mailows.com")])),
+            default
+        );
+    }
 }
 
 #[cfg(all(test, stalwart_tests))]

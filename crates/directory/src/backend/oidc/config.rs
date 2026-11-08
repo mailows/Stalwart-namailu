@@ -6,9 +6,9 @@
 
 use crate::Directory;
 use crate::backend::oidc::{
-    Conformance, ConformanceGaps, DiscoveryDocument, ExternalScopes, IntrospectionAuth, JwksState,
-    METADATA_MAX_SIZE, OAUTH_METADATA_PATH, OidcConfig, OidcDiscovery, OidcError, OpaqueValidation,
-    OpenIdDirectory,
+    Conformance, ConformanceGaps, Discovered, DiscoveryDocument, DiscoveryFailure, ExternalScopes,
+    IntrospectionAuth, JwksState, METADATA_MAX_SIZE, OAUTH_METADATA_PATH, OidcConfig,
+    OidcDiscovery, OidcError, OpaqueValidation, OpenIdDirectory,
     jwks::{FetchedKeys, fetch_jwks},
     openid_configuration_url, read_body,
 };
@@ -24,16 +24,20 @@ use reqwest::{
     header::{CONTENT_TYPE, HeaderMap},
 };
 use serde::Serialize;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use trc::AuthEvent;
 use utils::{
     http::http_client_builder,
     outbound::{OutboundClient, OutboundPolicy, Redirects},
 };
 
-const DISCOVERY_RETRY_FOR: Duration = Duration::from_secs(30);
-const DISCOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// naMailu fork: spacing of discovery retries while the provider is down.
+const DISCOVERY_RETRY_AFTER: Duration = Duration::from_secs(2);
+/// naMailu fork: 10 s instead of 30 s; a login waits at most this long for the IdP.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Metadata {
     document: DiscoveryDocument,
@@ -114,38 +118,95 @@ impl OpenIdDirectory {
         let http = OutboundClient::new(
             http_client_builder(config.allow_invalid_certs)
                 .user_agent("Stalwart/1.0")
-                .timeout(HTTP_TIMEOUT),
+                .timeout(HTTP_TIMEOUT)
+                // naMailu fork: credentials go to a fixed endpoint, never through a
+                // proxy inherited from the process environment.
+                .no_proxy(),
             config.outbound_policy,
             Redirects::None,
         );
 
-        let started_at = Instant::now();
-        let (discovery, issuers, keys) = loop {
-            match Self::discover(&http, &config).await {
-                Ok(discovery) => break discovery,
-                Err(err) if err.is_transient() && started_at.elapsed() < DISCOVERY_RETRY_FOR => {
-                    trc::event!(
-                        Auth(AuthEvent::Warning),
-                        Url = CompactString::from(config.issuer_url.as_str()),
-                        Reason = format_compact!(
-                            "{err}, retrying in {} seconds",
-                            DISCOVERY_RETRY_INTERVAL.as_secs()
-                        )
-                    );
-                    tokio::time::sleep(DISCOVERY_RETRY_INTERVAL).await;
-                }
-                Err(err) => return Err(err),
-            }
+        let directory = Self {
+            config,
+            discovered: RwLock::new(None),
+            discovery_lock: tokio::sync::Mutex::new(None),
+            http,
+            jwks: RwLock::new(JwksState::empty()),
+            jwks_refresh: tokio::sync::Mutex::new(()),
+            basic_auth_token: std::env::var("STALWART_OIDC_BASIC_AUTH_TOKEN")
+                .ok()
+                .filter(|token| !token.is_empty())
+                .map(String::into_boxed_str),
         };
 
-        Ok(Self {
-            config,
-            discovery,
-            issuers,
-            http,
-            jwks: RwLock::new(JwksState::new(keys)),
-            jwks_refresh: tokio::sync::Mutex::new(()),
-        })
+        // naMailu fork: try once at startup so that problems show up in the boot
+        // log. A misconfiguration still fails the directory, but an unreachable
+        // provider does not: the first authentication retries.
+        match directory.discovered().await {
+            Ok(_) => {}
+            Err(err) if err.is_transient() => {
+                trc::event!(
+                    Auth(AuthEvent::Warning),
+                    Url = CompactString::from(directory.config.issuer_url.as_str()),
+                    Reason = format_compact!(
+                        "OIDC discovery failed at startup, retrying on first use: {err}"
+                    )
+                );
+            }
+            Err(err) => return Err(err),
+        }
+
+        Ok(directory)
+    }
+
+    /// naMailu fork: discovery document and issuers, fetched on first use.
+    /// Concurrent callers share one fetch; after a failure the next attempt
+    /// waits `DISCOVERY_RETRY_AFTER`.
+    pub(crate) async fn discovered(&self) -> Result<Arc<Discovered>, OidcError> {
+        if let Some(discovered) = self.discovered.read().as_ref() {
+            return Ok(discovered.clone());
+        }
+
+        let mut last_failure = self.discovery_lock.lock().await;
+        if let Some(discovered) = self.discovered.read().as_ref() {
+            return Ok(discovered.clone());
+        }
+        if let Some(failure) = last_failure.as_ref()
+            && failure.at.elapsed() < DISCOVERY_RETRY_AFTER
+        {
+            return Err(OidcError::Network(format!(
+                "OIDC discovery unavailable (last attempt: {})",
+                failure.reason
+            )));
+        }
+
+        match Self::discover(&self.http, &self.config).await {
+            Ok((discovery, issuers, keys)) => {
+                let discovered = Arc::new(Discovered {
+                    discovery: Arc::new(discovery),
+                    issuers,
+                });
+                *self.jwks.write() = JwksState::new(keys);
+                *self.discovered.write() = Some(discovered.clone());
+                *last_failure = None;
+                Ok(discovered)
+            }
+            Err(err) => {
+                *last_failure = Some(DiscoveryFailure {
+                    at: Instant::now(),
+                    reason: err.to_string(),
+                });
+                Err(err)
+            }
+        }
+    }
+
+    /// naMailu fork: discovery document if it can be obtained now.
+    pub async fn discovery(&self) -> Option<Arc<OidcDiscovery>> {
+        self.discovered()
+            .await
+            .ok()
+            .map(|discovered| discovered.discovery.clone())
     }
 
     async fn discover(
@@ -167,6 +228,10 @@ impl OpenIdDirectory {
                 "Issuer mismatch: metadata at '{url}' says '{}' but the configured issuer is '{}'",
                 document.issuer, config.issuer_url,
             )));
+        }
+
+        if let Some(endpoint) = &document.password_verification_endpoint {
+            check_password_endpoint(endpoint, &document.issuer)?;
         }
 
         let oidc_url = openid_configuration_url(&document.issuer);
@@ -261,6 +326,28 @@ impl OpenIdDirectory {
             keys,
         ))
     }
+}
+
+/// naMailu fork: the password oracle receives plain passwords, so it must be
+/// HTTPS on the issuer's own host and carry no userinfo.
+pub(crate) fn check_password_endpoint(endpoint: &str, issuer: &str) -> Result<(), OidcError> {
+    let endpoint = Url::parse(endpoint).map_err(|err| {
+        OidcError::Provider(format!("Invalid password_verification_endpoint URL: {err}"))
+    })?;
+    let issuer = Url::parse(issuer)
+        .map_err(|err| OidcError::Provider(format!("Invalid issuer URL: {err}")))?;
+    if endpoint.scheme() != "https"
+        || endpoint.host_str() != issuer.host_str()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+    {
+        return Err(OidcError::Provider(
+            "password_verification_endpoint must be HTTPS, contain no userinfo, \
+             and use the same hostname as the issuer"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn introspection_auth(config: &structs::OidcDirectory) -> Result<IntrospectionAuth, String> {

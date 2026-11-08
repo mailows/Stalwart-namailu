@@ -229,6 +229,14 @@ impl<T: SessionStream> Session<T> {
             vec![]
         };
 
+        // naMailu fork: DKIM evidence for the header From, used by the MTA hook as
+        // the allowlist fallback when forwarding breaks SPF of the original sender.
+        // The DATA hook below sees the same, unmodified message.
+        self.data.dkim_verified_from = crate::inbound::hooks::message::dkim_verified_from(
+            auth_message.from_addresses(),
+            &dkim_output,
+        );
+
         // Verify ARC
         let arc = self
             .eval_if(&ac.arc.verify)

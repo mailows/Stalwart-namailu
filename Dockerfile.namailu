@@ -1,0 +1,26 @@
+# Namailu AGPL build of Stalwart 1.0.3.
+#
+# Only the PostgreSQL storage and S3 blob backends used by the deployment are
+# enabled. Mail protocols, JMAP, OIDC directories and filtering are core features.
+FROM rust:1.98.1-slim-trixie AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential clang cmake libclang-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --locked --release -p stalwart \
+      --no-default-features --features "postgres s3" \
+    && cp /src/target/release/stalwart /tmp/stalwart
+
+FROM stalwartlabs/stalwart:v1.0.3
+LABEL org.opencontainers.image.source="https://github.com/mailows/Stalwart-namailu" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.description="Stalwart 1.0.3 with the Namailu fork changes"
+COPY --from=builder --chmod=0755 /tmp/stalwart /usr/local/bin/stalwart

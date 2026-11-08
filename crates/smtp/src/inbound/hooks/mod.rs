@@ -22,6 +22,22 @@ pub struct Request<'x> {
 
 #[derive(Serialize, Deserialize)]
 pub struct Context {
+    /// naMailu fork: server-created SPF evidence for the exact non-null MAIL FROM;
+    /// never taken from a header.
+    #[serde(
+        rename = "verifiedEnvelopeSender",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub verified_envelope_sender: Option<String>,
+    /// naMailu fork: server-verified DKIM identity, the single header From with an
+    /// aligned pass.
+    #[serde(
+        rename = "dkimVerifiedFrom",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub dkim_verified_from: Option<String>,
     pub stage: Stage,
     pub client: Client,
     #[serde(skip_serializing_if = "Option::is_none")]

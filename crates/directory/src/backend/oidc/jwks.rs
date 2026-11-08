@@ -64,6 +64,20 @@ impl KeySet {
 }
 
 impl JwksState {
+    /// naMailu fork: no keys before the first discovery. Discovery fills the
+    /// state before any token is validated (`OpenIdDirectory::discovered`).
+    pub(crate) fn empty() -> Self {
+        let now = Instant::now();
+        JwksState {
+            keys: Arc::new(KeySet {
+                keys: AHashMap::default(),
+            }),
+            fetched_at: now,
+            attempted_at: now,
+            max_age: JWKS_DEFAULT_MAX_AGE,
+        }
+    }
+
     pub(crate) fn new(fetched: FetchedKeys) -> Self {
         let now = Instant::now();
         JwksState {
@@ -122,8 +136,10 @@ impl OpenIdDirectory {
     }
 
     async fn refresh_keys(&self) -> Result<Arc<KeySet>, OidcError> {
+        let discovered = self.discovered().await?;
+        let jwks_uri = discovered.discovery.document.jwks_uri.as_str();
         self.jwks.write().attempted_at = Instant::now();
-        match fetch_jwks(&self.http, &self.discovery.document.jwks_uri, &self.issuers).await {
+        match fetch_jwks(&self.http, jwks_uri, &discovered.issuers).await {
             Ok(fetched) => {
                 let keys = Arc::new(fetched.keys);
                 let mut state = self.jwks.write();
@@ -135,7 +151,7 @@ impl OpenIdDirectory {
             Err(err) => {
                 trc::event!(
                     Auth(AuthEvent::Warning),
-                    Url = CompactString::from(self.discovery.document.jwks_uri.as_str()),
+                    Url = CompactString::from(jwks_uri),
                     Reason = format_compact!("JWKS refresh failed, keeping cached keys: {err}")
                 );
                 Err(err)

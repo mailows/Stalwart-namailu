@@ -186,6 +186,14 @@ impl<T: SessionStream> Session<T> {
     }
 
     fn register_auth_failure(&mut self, err: trc::Error) -> trc::Error {
+        if err.matches(trc::EventType::Auth(trc::AuthEvent::Error)) {
+            // naMailu fork: backend error, not a wrong password (RFC 3206 SYS/TEMP).
+            // See the IMAP counterpart.
+            return err.ctx_unique(
+                trc::Key::Details,
+                "[SYS/TEMP] Temporary authentication failure, try again later.",
+            );
+        }
         if err.matches(trc::EventType::Auth(trc::AuthEvent::Failed)) {
             match &mut self.state {
                 State::NotAuthenticated { auth_failures, .. }

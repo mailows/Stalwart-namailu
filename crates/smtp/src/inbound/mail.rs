@@ -481,6 +481,13 @@ impl<T: SessionStream> Session<T> {
                     .handle_spf(&spf_output, self.params.spf_mail_from.is_strict())
                     .await?
                 {
+                    // naMailu fork: remember which identity SPF actually evaluated.
+                    self.data.spf_checked_sender = self
+                        .data
+                        .mail_from
+                        .as_ref()
+                        .filter(|from| !from.address_lcase.is_empty())
+                        .map(|from| from.address_lcase.to_string());
                     self.data.spf_mail_from = spf_output.into();
                 } else {
                     self.data.mail_from = None;
