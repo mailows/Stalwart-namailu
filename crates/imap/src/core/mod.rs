@@ -6,8 +6,8 @@
 
 use common::{
     Inner, MailboxCache, MailboxesCache, MessageStoreCache, Server,
-    auth::AccessToken,
-    cache::email::MessageRef,
+    auth::{AccessToken, oauth::scope::OAuthScopes},
+    cache::{email::MessageRef, http_auth::RevocationEpoch},
     config::mailstore::email::DefaultFolder,
     network::{ServerInstance, SessionStream, limiter::InFlight},
 };
@@ -17,6 +17,7 @@ use imap_proto::{
     protocol::{MailboxObjectId, ObjectId, ProtocolVersion, id::ClientId, list::Attribute},
     receiver::Receiver,
 };
+use registry::schema::enums::Permission;
 use std::{
     net::IpAddr,
     sync::{Arc, atomic::AtomicU32},
@@ -73,7 +74,9 @@ pub struct Session<T: SessionStream> {
 
 pub struct SessionData<T: SessionStream> {
     pub account_id: u32,
-    pub access_token: AccessToken,
+    // naMailu fork (K5): the token is revalidated before every command and
+    // replaced in place, so it lives behind a lock; read it via access_token().
+    token: parking_lot::Mutex<SessionToken>,
     pub server: Server,
     pub session_id: u64,
     pub mailboxes: parking_lot::Mutex<Vec<AccountView>>,
@@ -81,6 +84,11 @@ pub struct SessionData<T: SessionStream> {
     pub state: AtomicU32,
     pub remote_addr: IpAddr,
     pub in_flight: Option<InFlight>,
+}
+
+struct SessionToken {
+    access_token: AccessToken,
+    revocation_epoch: RevocationEpoch,
 }
 
 pub struct SelectedMailbox {
@@ -276,11 +284,43 @@ impl<T: SessionStream> State<T> {
 }
 
 impl<T: SessionStream> SessionData<T> {
+    /// The session's current access token (cheap clone: an `Arc` and two words).
+    pub fn access_token(&self) -> AccessToken {
+        self.token.lock().access_token.clone()
+    }
+
     pub async fn refresh_access_token(&self) -> trc::Result<AccessToken> {
         self.server
-            .renew_access_token(&self.access_token, self.remote_addr)
+            .renew_access_token(&self.access_token(), self.remote_addr)
             .await
             .caused_by(trc::location!())
+    }
+
+    /// naMailu fork (K5): revalidates the session against the current account
+    /// state (cache hit on the common path) and stores the fresh token, so that
+    /// every later permission check runs on current rights. An `Auth`/`Security`
+    /// error means the account was blocked, deleted, lost IMAP access or the
+    /// credential (AppPassword, OAuth grant) was removed: the caller must close
+    /// the connection.
+    pub async fn revalidate(&self) -> trc::Result<()> {
+        let (current, mut epoch) = {
+            let token = self.token.lock();
+            (token.access_token.clone(), token.revocation_epoch)
+        };
+        let renewed = self
+            .server
+            .revalidate_session_token(
+                &current,
+                &mut epoch,
+                self.remote_addr,
+                Permission::ImapAuthenticate,
+                OAuthScopes::MAIL,
+            )
+            .await?;
+        let mut token = self.token.lock();
+        token.access_token = renewed;
+        token.revocation_epoch = epoch;
+        Ok(())
     }
 
     pub fn replace_stream_tx<U: SessionStream>(
@@ -295,7 +335,7 @@ impl<T: SessionStream> SessionData<T> {
             stream_tx: new_stream,
             state: self.state,
             in_flight: self.in_flight,
-            access_token: self.access_token,
+            token: self.token,
             remote_addr: self.remote_addr,
         }
     }

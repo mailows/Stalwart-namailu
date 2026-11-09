@@ -7,10 +7,12 @@
 use super::{
     AccountCaches, AccountView, CounterDelta, Counters, MailboxChange, MailboxCounters, MailboxId,
     MailboxName, MailboxRefresh, MailboxSource, MailboxSync, SelectedAccess, Session, SessionData,
+    SessionToken,
 };
 use common::{
     MailboxesCache, MessageStoreCache,
     auth::AccessToken,
+    cache::http_auth::RevocationEpoch,
     config::mailstore::email::DefaultFolder,
     network::{SessionStream, limiter::InFlight},
     sharing::EffectiveAcl,
@@ -39,6 +41,7 @@ impl<T: SessionStream> SessionData<T> {
     pub async fn new(
         session: &Session<T>,
         access_token: AccessToken,
+        revocation_epoch: RevocationEpoch,
         in_flight: Option<InFlight>,
     ) -> trc::Result<Self> {
         let data = SessionData {
@@ -49,25 +52,28 @@ impl<T: SessionStream> SessionData<T> {
             mailboxes: Mutex::new(Vec::new()),
             state: token_state(&access_token).into(),
             remote_addr: session.remote_addr,
-            access_token,
+            token: Mutex::new(SessionToken {
+                access_token,
+                revocation_epoch,
+            }),
             in_flight,
         };
 
-        let shared = data
-            .access_token
+        let access_token = data.access_token();
+        let shared = access_token
             .shared_accounts(Collection::Mailbox)
             .copied()
             .collect::<Vec<_>>();
         let mut accounts = Vec::with_capacity(shared.len() + 1);
         accounts.push(
-            data.account_view(data.account_id, None, &data.access_token)
+            data.account_view(data.account_id, None, &access_token)
                 .await
                 .caused_by(trc::location!())?,
         );
         for account_id in shared {
             let prefix = data.shared_prefix(account_id).await?;
             accounts.push(
-                data.account_view(account_id, Some(prefix), &data.access_token)
+                data.account_view(account_id, Some(prefix), &access_token)
                     .await
                     .caused_by(trc::location!())?,
             );
@@ -639,7 +645,7 @@ impl<T: SessionStream> SessionData<T> {
     }
 
     pub fn is_acl_shared(&self, account_id: u32) -> bool {
-        !self.access_token.member_ids().any(|id| id == account_id)
+        !self.access_token().member_ids().any(|id| id == account_id)
     }
 
     pub async fn selected_access(&self, mailbox: &MailboxId) -> trc::Result<SelectedAccess> {

@@ -5,7 +5,10 @@
  */
 
 use crate::{
-    core::{AccountCaches, SelectedAccess, SelectedMailbox, Session, SessionData, State},
+    core::{
+        AccountCaches, SelectedAccess, SelectedMailbox, Session, SessionData, State,
+        client::{ACCESS_REVOKED_BYE, is_access_revoked},
+    },
     op::ImapContext,
 };
 use common::{
@@ -41,6 +44,9 @@ use types::type_state::DataType;
 use utils::map::bitmap::Bitmap;
 
 const SHARED_STATUS_INTERVAL: Duration = Duration::from_secs(1);
+// naMailu fork (K5): how often an otherwise quiet IDLE revalidates the
+// session's rights (one access-token cache lookup).
+const IDLE_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_idle(
@@ -80,7 +86,7 @@ impl<T: SessionStream> Session<T> {
         };
         let (mut primary_rx, mut shared_rx) = subscribe_idle(
             &self.server.inner.ipc.push_subscribers,
-            &data.access_token,
+            &data.access_token(),
             primary_id,
             types,
         );
@@ -106,15 +112,21 @@ impl<T: SessionStream> Session<T> {
         let mut notifications = Vec::new();
         let mut shared_notifications = Vec::new();
         let mut schedule = PassSchedule::Paced(op_start);
+        // naMailu fork (K5): the idle timeout counts from the last activity, as
+        // before; the periodic revalidation wake-ups must not extend it.
+        let mut last_activity = Instant::now();
         loop {
-            let wait = schedule.wait(timeout_idle);
+            let remaining = timeout_idle.saturating_sub(last_activity.elapsed());
+            let wait = schedule.wait(remaining);
+            let sleep = wait.min(IDLE_REVALIDATE_INTERVAL);
             let wake = tokio::select! {
-                result = tokio::time::timeout(wait, self.stream_rx.read(&mut byte)) => {
+                result = tokio::time::timeout(sleep, self.stream_rx.read(&mut byte)) => {
                     match result {
                         Ok(Ok(0)) => {
                             return Err(trc::NetworkEvent::Closed.into_err().details("IMAP connection closed by client.").id(request.tag));
                         }
                         Ok(Ok(_)) => {
+                            last_activity = Instant::now();
                             window.rotate_left(1);
                             window[3] = byte[0];
                             if &window == b"DONE" {
@@ -133,7 +145,8 @@ impl<T: SessionStream> Session<T> {
                         Ok(Err(err)) => {
                             return Err(trc::NetworkEvent::ReadError.into_err().reason(err).details("IMAP connection error.").id(request.tag));
                         },
-                        Err(_) if wait < timeout_idle => Wake::Due,
+                        Err(_) if sleep < wait => Wake::Revalidate,
+                        Err(_) if wait < remaining => Wake::Due,
                         Err(_) => {
                             self.write_bytes(&b"* BYE IDLE timed out.\r\n"[..]).await.ok();
                             return Err(trc::NetworkEvent::Timeout.into_err().details("IMAP IDLE timed out.").id(request.tag));
@@ -144,11 +157,28 @@ impl<T: SessionStream> Session<T> {
                 received = recv_shared(&mut shared_rx, &mut shared_notifications), if !schedule.is_deferred() => Wake::received(received),
             };
 
+            // naMailu fork (K5): revalidate before anything is pushed to the
+            // client (new mail counts, flags) and periodically while quiet.
+            if !matches!(wake, Wake::Closed)
+                && let Err(err) = data.revalidate().await
+            {
+                if is_access_revoked(&err) {
+                    self.write_bytes(ACCESS_REVOKED_BYE).await.ok();
+                    return Err(trc::NetworkEvent::Closed
+                        .into_err()
+                        .caused_by(err)
+                        .details("IMAP session access revoked during IDLE.")
+                        .id(request.tag));
+                }
+                trc::error!(err.span_id(self.session_id));
+            }
             let mut check_mailboxes = match wake {
+                Wake::Revalidate => continue,
                 Wake::Notified => false,
                 Wake::Due => true,
                 Wake::Closed => return Err(self.idle_closed(request.tag).await),
             };
+            last_activity = Instant::now();
             let mut changes = IdleChanges::default();
             for notification in notifications.drain(..) {
                 changes.add(&notification);
@@ -235,6 +265,7 @@ fn take_pending(rx: &mut PushReceiver, notifications: &mut Vec<PushNotification>
 }
 
 enum Wake {
+    Revalidate,
     Notified,
     Due,
     Closed,

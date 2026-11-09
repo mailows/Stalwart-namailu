@@ -8,8 +8,12 @@ use crate::{
     Session, State,
     protocol::{Command, Mechanism, request::Error},
 };
-use common::network::{SessionResult, SessionStream};
+use common::{
+    auth::oauth::scope::OAuthScopes,
+    network::{SessionResult, SessionStream},
+};
 use directory::Credentials;
+use registry::schema::enums::Permission;
 use trc::SecurityEvent;
 
 impl<T: SessionStream> Session<T> {
@@ -91,6 +95,19 @@ impl<T: SessionStream> Session<T> {
         }
 
         for request in requests {
+            // naMailu fork (K5): revalidate the session's rights before every
+            // command in the TRANSACTION state (QUIT included, so a revoked
+            // session never reaches the UPDATE state and its deletions).
+            match self.revalidate_session().await {
+                Ok(()) => {}
+                Err(None) => return SessionResult::Close,
+                Err(Some(err)) => {
+                    if !self.write_err(err).await {
+                        return SessionResult::Close;
+                    }
+                    continue;
+                }
+            }
             let result = match request {
                 Ok(command) => match self.validate_request(command).await {
                     Ok(command) => match command {
@@ -187,6 +204,54 @@ impl<T: SessionStream> Session<T> {
         }
 
         SessionResult::Continue
+    }
+
+    /// naMailu fork (K5): `Err(None)` = access revoked (blocked or deleted
+    /// account, POP3 permission removed, credential removed), `-ERR` was sent
+    /// and the connection must be closed; `Err(Some(err))` = transient failure.
+    async fn revalidate_session(&mut self) -> Result<(), Option<trc::Error>> {
+        let State::Authenticated {
+            access_token,
+            revocation_epoch,
+            ..
+        } = &mut self.state
+        else {
+            return Ok(());
+        };
+        let mut epoch = *revocation_epoch;
+        match self
+            .server
+            .revalidate_session_token(
+                access_token,
+                &mut epoch,
+                self.remote_addr,
+                Permission::Pop3Authenticate,
+                OAuthScopes::MAIL,
+            )
+            .await
+        {
+            Ok(renewed) => {
+                *access_token = renewed;
+                *revocation_epoch = epoch;
+                Ok(())
+            }
+            Err(err)
+                if matches!(
+                    err.as_ref(),
+                    trc::EventType::Auth(_) | trc::EventType::Security(_)
+                ) =>
+            {
+                trc::error!(
+                    err.span_id(self.session_id)
+                        .details("POP3 session access revoked, closing connection.")
+                );
+                self.write_bytes(&b"-ERR Access to this account was revoked.\r\n"[..])
+                    .await
+                    .ok();
+                Err(None)
+            }
+            Err(err) => Err(Some(err)),
+        }
     }
 
     async fn validate_request(

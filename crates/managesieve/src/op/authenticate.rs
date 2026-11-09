@@ -89,6 +89,8 @@ impl<T: SessionStream> Session<T> {
         };
 
         // Authenticate
+        // naMailu fork (K5): read before the credentials are checked.
+        let revocation_epoch = self.server.inner.cache.grant_revocations.epoch();
         let request = AuthRequest::from_credentials(credentials, self.session_id, self.remote_addr);
         let access_token = match self.server.authenticate(&request).await {
             Ok(authenticated) => match bearer {
@@ -144,6 +146,7 @@ impl<T: SessionStream> Session<T> {
         self.state = State::Authenticated {
             access_token,
             in_flight,
+            revocation_epoch,
         };
         self.receiver.max_request_size = self.server.core.imap.max_request_size;
 

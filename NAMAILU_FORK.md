@@ -22,6 +22,7 @@ rewrite and none of them applies as a patch. Plan and status:
 | 11 | `verifiedEnvelopeSender`, `dkimVerifiedFrom` in the hook context | ported | `crates/smtp/src/{core/mod,inbound/{mail,session,data}}.rs`, `crates/smtp/src/inbound/hooks/{mod,message}.rs` |
 | 12 | scan + strip verdict headers on JMAP import/set and IMAP APPEND | ported | `crates/email/src/message/ingest.rs`, `crates/jmap/src/email/{import,set}.rs`, `crates/imap/src/op/append.rs` |
 | 13 | Google FBL: server-owned, DKIM-signed Feedback-ID | ported | `crates/smtp/src/inbound/{data,dkim}.rs`, `crates/common/src/config/smtp/auth.rs` |
+| 14 | open IMAP/POP3/ManageSieve sessions revalidate the account before every command (review K5) | new in 1.0 | `crates/common/src/auth/oauth/grant.rs`, `crates/imap/src/core/{mod,client,mailbox}.rs`, `crates/imap/src/op/{idle,authenticate}.rs`, `crates/pop3/src/{client,lib}.rs`, `crates/pop3/src/op/authenticate.rs`, `crates/managesieve/src/core/{client,mod}.rs`, `crates/managesieve/src/op/authenticate.rs` |
 
 ## Unified password (1, 3, 5)
 
@@ -145,6 +146,40 @@ address. Authenticated mail is DKIM1-signed by a second set of signers built fro
 the same keys that always cover `Feedback-ID`, also for older keys whose persisted
 header list lacks it; other mail never signs a `Feedback-ID`. (The registry
 default header list is generated code and left unchanged.)
+
+## Session revalidation (14)
+
+Upstream keeps the `AccessToken` of the login for the whole IMAP, POP3 or
+ManageSieve connection, and the command checks (`assert_has_permission`, the own
+account in `assert_selected_readable`, POP3 `RETR`/`TOP`) run on it. Blocking an
+account (`permissions` replaced by an empty set), deleting it or removing the
+AppPassword stopped new logins only; a connection opened before kept reading,
+creating folders and running `STAT` (reproduced on a staging clone, 10. 11. 2026).
+
+- `Server::revalidate_session_token` rebuilds the token from the access token
+  cache (`access_token(account_id)`: a cache hit unless the account changed; the
+  password is never verified again), re-applies the credential scope (a removed
+  or expired AppPassword fails), allowed IPs and expiry, and requires
+  `Authenticate` + the protocol permission (`ImapAuthenticate`,
+  `Pop3Authenticate`, `SieveAuthenticate`) + the `mail` OAuth scope. An OAuth
+  grant is looked up again only when the grant revocation epoch moved (read
+  before the login, as the JMAP WebSocket does).
+- IMAP runs it before every command and stores the fresh token in the session
+  (behind a lock, read with `SessionData::access_token()`), so every later check
+  sees current rights; IDLE runs it on every wake-up and at least every 60 s
+  without extending the idle timeout. POP3 runs it before every command in the
+  TRANSACTION state (QUIT too, so a revoked session never reaches UPDATE and its
+  deletions), ManageSieve before every authenticated command.
+- `Auth`/`Security` outcome = revoked: IMAP `* BYE [NOPERM] Access to this account
+  was revoked.`, POP3 `-ERR Access to this account was revoked.`, ManageSieve
+  `BYE "…"`, then the connection is closed. Other errors (store unavailable) fail
+  only that command (`NO`/`-ERR`).
+- Not covered: a change of the primary password alone does not end sessions
+  (deliberate, the review asks for blocking, not password re-checks); an external
+  JWT bearer used for IMAP/POP3 keeps the session past its `exp` (same root cause
+  as K6, `TokenScope::External` carries no deadline); a revoked master user
+  (impersonation) is not re-checked, only the impersonated account; a command
+  already running (a large FETCH) completes.
 
 ## Build
 

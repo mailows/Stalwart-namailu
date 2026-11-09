@@ -55,7 +55,7 @@ impl<T: SessionStream> Session<T> {
         );
         if let State::Authenticated { data } | State::Selected { data, .. } = &self.state
             && data
-                .access_token
+                .access_token()
                 .has_permission(Permission::ImapMetadataGet)
         {
             capabilities.extend([Capability::Metadata, Capability::ListMetadata]);

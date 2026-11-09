@@ -94,7 +94,7 @@ impl<T: SessionStream> SessionData<T> {
             .name
             .strip_prefix("#")
             .and_then(|id| id.parse().ok())
-            .filter(|id| self.access_token.is_member(*id))
+            .filter(|id| self.access_token().is_member(*id))
             .ok_or_else(|| {
                 trc::ImapEvent::Error
                     .into_err()

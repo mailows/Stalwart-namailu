@@ -114,6 +114,8 @@ impl<T: SessionStream> Session<T> {
         bearer: Option<BearerMechanism>,
     ) -> trc::Result<()> {
         // Authenticate
+        // naMailu fork (K5): read before the credentials are checked.
+        let revocation_epoch = self.server.inner.cache.grant_revocations.epoch();
         let request = AuthRequest::from_credentials(credentials, self.session_id, self.remote_addr);
         let access_token = match self.server.authenticate(&request).await {
             Ok(authenticated) => match bearer {
@@ -167,6 +169,7 @@ impl<T: SessionStream> Session<T> {
             in_flight,
             mailbox,
             access_token,
+            revocation_epoch,
         };
         self.write_ok("Authentication successful").await
     }

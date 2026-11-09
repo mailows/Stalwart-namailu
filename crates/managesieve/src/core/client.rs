@@ -5,9 +5,13 @@
  */
 
 use super::{Command, ResponseCode, SerializeResponse, Session, State};
-use common::network::{SessionResult, SessionStream};
+use common::{
+    auth::oauth::scope::OAuthScopes,
+    network::{SessionResult, SessionStream},
+};
 use compact_str::format_compact;
 use imap_proto::receiver::{self, Request};
+use registry::schema::enums::Permission;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use trc::{AddContext, SecurityEvent};
 use types::{collection::Collection, field::SieveField};
@@ -132,6 +136,19 @@ impl<T: SessionStream> Session<T> {
         }
 
         for request in requests {
+            // naMailu fork (K5): revalidate the session's rights before every
+            // command once authenticated.
+            match self.revalidate_session().await {
+                Ok(()) => {}
+                Err(None) => return SessionResult::Close,
+                Err(Some(err)) => {
+                    if let Err(err) = self.write_error(err).await {
+                        trc::error!(err.span_id(self.session_id));
+                        return SessionResult::Close;
+                    }
+                    continue;
+                }
+            }
             let command = request.command;
             match match command {
                 Command::ListScripts => self.handle_listscripts().await,
@@ -186,6 +203,53 @@ impl<T: SessionStream> Session<T> {
         }
 
         SessionResult::Continue
+    }
+
+    /// naMailu fork (K5): `Err(None)` = access revoked, `BYE` was sent and the
+    /// connection must be closed; `Err(Some(err))` = transient failure.
+    async fn revalidate_session(&mut self) -> Result<(), Option<trc::Error>> {
+        let State::Authenticated {
+            access_token,
+            revocation_epoch,
+            ..
+        } = &mut self.state
+        else {
+            return Ok(());
+        };
+        let mut epoch = *revocation_epoch;
+        match self
+            .server
+            .revalidate_session_token(
+                access_token,
+                &mut epoch,
+                self.remote_addr,
+                Permission::SieveAuthenticate,
+                OAuthScopes::MAIL,
+            )
+            .await
+        {
+            Ok(renewed) => {
+                *access_token = renewed;
+                *revocation_epoch = epoch;
+                Ok(())
+            }
+            Err(err)
+                if matches!(
+                    err.as_ref(),
+                    trc::EventType::Auth(_) | trc::EventType::Security(_)
+                ) =>
+            {
+                trc::error!(
+                    err.span_id(self.session_id)
+                        .details("ManageSieve session access revoked, closing connection.")
+                );
+                self.write(b"BYE \"Access to this account was revoked.\"\r\n")
+                    .await
+                    .ok();
+                Err(None)
+            }
+            Err(err) => Err(Some(err)),
+        }
     }
 
     async fn validate_request(&self, command: Request<Command>) -> trc::Result<Request<Command>> {

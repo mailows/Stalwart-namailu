@@ -280,7 +280,7 @@ impl<T: SessionStream> SessionData<T> {
         let containers = self
             .server
             .preload_container_cleanup(
-                self.access_token.changed_by(),
+                self.access_token().changed_by(),
                 account_id,
                 Collection::Email,
                 &flagged_ids,
@@ -310,7 +310,7 @@ impl<T: SessionStream> SessionData<T> {
                         batch
                             .custom(
                                 ObjectIndexBuilder::<_, ()>::new()
-                                    .with_changed_by(self.access_token.changed_by())
+                                    .with_changed_by(self.access_token().changed_by())
                                     .with_current(metadata),
                             )
                             .caused_by(trc::location!())?

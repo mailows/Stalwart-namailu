@@ -11,6 +11,7 @@ use std::{net::IpAddr, sync::Arc};
 use common::{
     Inner, Server,
     auth::AccessToken,
+    cache::http_auth::RevocationEpoch,
     network::{ServerInstance, SessionStream, limiter::InFlight},
 };
 use mailbox::Mailbox;
@@ -56,6 +57,8 @@ pub enum State {
         mailbox: Mailbox,
         in_flight: Option<InFlight>,
         access_token: AccessToken,
+        // naMailu fork (K5): grant revocation epoch seen by the last revalidation.
+        revocation_epoch: RevocationEpoch,
     },
 }
 

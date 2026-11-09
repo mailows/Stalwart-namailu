@@ -24,7 +24,7 @@ impl<T: SessionStream> Session<T> {
         let (data, mailbox) = self.state.select_data();
 
         let mut skipped_expunge = None;
-        if mailbox.is_select && data.access_token.has_permission(Permission::ImapExpunge) {
+        if mailbox.is_select && data.access_token().has_permission(Permission::ImapExpunge) {
             let cache = data
                 .server
                 .get_cached_messages(mailbox.id.account_id)

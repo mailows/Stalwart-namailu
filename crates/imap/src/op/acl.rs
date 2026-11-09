@@ -60,7 +60,7 @@ impl<T: SessionStream> Session<T> {
                 .imap_ctx(&arguments.tag, trc::location!())?;
 
             // Add the current user if they are the owner or a group member
-            if data.access_token.is_member(mailbox_id.account_id) {
+            if data.access_token().is_member(mailbox_id.account_id) {
                 let account_name = data
                     .server
                     .account(mailbox_id.account_id)
@@ -386,7 +386,7 @@ impl<T: SessionStream> Session<T> {
     pub fn assert_has_permission(&self, permission: Permission) -> trc::Result<bool> {
         match &self.state {
             State::Authenticated { data } | State::Selected { data, .. } => data
-                .access_token
+                .access_token()
                 .enforce_permission(permission)
                 .map(|_| true),
             State::NotAuthenticated { .. } => Ok(false),

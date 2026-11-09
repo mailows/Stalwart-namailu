@@ -8,12 +8,12 @@ use super::{scope::OAuthScopes, token::TokenGrant};
 use crate::{
     Server,
     auth::{AccessToken, RECOVERY_ADMIN_ID, TokenScope},
-    cache::invalidate::CacheInvalidationBuilder,
+    cache::{http_auth::RevocationEpoch, invalidate::CacheInvalidationBuilder},
     ipc::CacheInvalidation,
 };
 use registry::{
     schema::{
-        enums::OAuthClientKind,
+        enums::{OAuthClientKind, Permission},
         prelude::{Object, ObjectInner, ObjectType, Property},
         structs::OAuthGrant,
     },
@@ -34,6 +34,22 @@ use types::id::Id;
 pub const MAX_OAUTH_GRANTS: usize = 256;
 pub const RECOVERY_ADMIN_GRANT_ID: u64 = 1 << 62;
 const MAX_WRITE_ATTEMPTS: usize = 3;
+
+/// naMailu fork (K5): rebuilds a session token from the current account
+/// state (`inner` from the access token cache) and checks it still allows the
+/// session. Kept free of I/O so it can be unit tested.
+pub(crate) fn revalidated_session_token(
+    inner: std::sync::Arc<crate::auth::AccessTokenInner>,
+    previous: &AccessToken,
+    token_scope: Option<TokenScope>,
+    remote_ip: StdIpAddr,
+    permission: Permission,
+    required_scopes: OAuthScopes,
+) -> trc::Result<AccessToken> {
+    AccessToken::renew(inner, previous.credential_id(), token_scope, remote_ip)?
+        .assert_allows_oauth_scopes(required_scopes)?
+        .assert_has_permissions(&[Permission::Authenticate, permission])
+}
 
 pub struct NewOAuthGrant<'x> {
     pub account_id: u32,
@@ -230,6 +246,50 @@ impl Server {
             )
             .map(Some)
         }
+    }
+
+    /// naMailu fork (K5): revalidates the security state of a long-lived
+    /// protocol session (IMAP, POP3, ManageSieve) before it runs a command.
+    ///
+    /// The account part comes from the access token cache, so on the common
+    /// path this is a cache hit plus a few bit tests; it never verifies the
+    /// password again. The token is rebuilt from the current cache entry, which
+    /// re-applies the credential scope (a removed or expired AppPassword fails
+    /// here), the allowed IPs and the expiry, then the session must still hold
+    /// `Authenticate`, the protocol permission and, for OAuth tokens, the
+    /// required scope. An OAuth grant is looked up again only after the grant
+    /// revocation epoch moved. Any `Auth`/`Security` error means the session
+    /// must be closed; other errors (store unavailable) are transient.
+    pub async fn revalidate_session_token(
+        &self,
+        access_token: &AccessToken,
+        revocation_epoch: &mut RevocationEpoch,
+        remote_ip: StdIpAddr,
+        permission: Permission,
+        required_scopes: OAuthScopes,
+    ) -> trc::Result<AccessToken> {
+        let account_id = access_token.account_id();
+        let mut token_scope = access_token.token_scope();
+        let mut next_epoch = None;
+        if let Some(TokenScope::Grant { grant_id, .. }) = token_scope {
+            let epoch = self.inner.cache.grant_revocations.epoch();
+            if epoch != *revocation_epoch {
+                token_scope = Some(self.oauth_grant_scope(grant_id, account_id).await?);
+                next_epoch = Some(epoch);
+            }
+        }
+        let token = revalidated_session_token(
+            self.access_token(account_id).await?,
+            access_token,
+            token_scope,
+            remote_ip,
+            permission,
+            required_scopes,
+        )?;
+        if let Some(epoch) = next_epoch {
+            *revocation_epoch = epoch;
+        }
+        Ok(token)
     }
 
     pub async fn create_oauth_grant(&self, new: NewOAuthGrant<'_>) -> trc::Result<u64> {
@@ -510,3 +570,195 @@ impl Server {
 #[rustfmt::skip]
 #[path = "../../../../../../stalwart-tests/unit/common/src/auth/oauth/grant/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod namailu_k5_tests {
+    //! naMailu fork (K5): an IMAP/POP3/ManageSieve session revalidates its
+    //! token against the current account state before every command.
+    use super::revalidated_session_token;
+    use crate::auth::{
+        AccessScope, AccessToken, AccessTokenInner, Permissions, TokenScope,
+        oauth::scope::OAuthScopes,
+    };
+    use registry::schema::enums::Permission;
+    use std::{net::IpAddr, sync::Arc};
+
+    const IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+    const APP_PASSWORD: u32 = 7;
+
+    fn perms(list: &[Permission]) -> Permissions {
+        let mut permissions = Permissions::new();
+        for permission in list {
+            permissions.set(*permission as usize);
+        }
+        permissions
+    }
+
+    fn scope(permissions: Permissions, credential_id: u32, expires_at: u64) -> AccessScope {
+        AccessScope {
+            permissions,
+            credential_id,
+            expires_at,
+            allowed_ips: Box::new([]),
+        }
+    }
+
+    fn inner(scopes: Vec<AccessScope>) -> Arc<AccessTokenInner> {
+        Arc::new(AccessTokenInner {
+            account_id: 42,
+            scopes: scopes.into_boxed_slice(),
+            ..Default::default()
+        })
+    }
+
+    fn mail_user() -> Permissions {
+        perms(&[
+            Permission::Authenticate,
+            Permission::ImapAuthenticate,
+            Permission::Pop3Authenticate,
+            Permission::SieveAuthenticate,
+            Permission::ImapFetch,
+        ])
+    }
+
+    fn active() -> Arc<AccessTokenInner> {
+        inner(vec![
+            scope(mail_user(), u32::MAX, u64::MAX),
+            scope(mail_user(), APP_PASSWORD, u64::MAX),
+        ])
+    }
+
+    fn login(inner: Arc<AccessTokenInner>, credential_id: Option<u32>) -> AccessToken {
+        AccessToken::renew(inner, credential_id, None, IP).unwrap()
+    }
+
+    fn closes_session(err: &trc::Error) -> bool {
+        matches!(
+            err.as_ref(),
+            trc::EventType::Auth(_) | trc::EventType::Security(_)
+        )
+    }
+
+    fn check(
+        inner: Arc<AccessTokenInner>,
+        previous: &AccessToken,
+        permission: Permission,
+    ) -> trc::Result<AccessToken> {
+        revalidated_session_token(
+            inner,
+            previous,
+            previous.token_scope(),
+            IP,
+            permission,
+            OAuthScopes::MAIL,
+        )
+    }
+
+    #[test]
+    fn unchanged_account_keeps_the_session() {
+        let current = active();
+        for credential_id in [None, Some(APP_PASSWORD)] {
+            let session = login(current.clone(), credential_id);
+            for permission in [
+                Permission::ImapAuthenticate,
+                Permission::Pop3Authenticate,
+                Permission::SieveAuthenticate,
+            ] {
+                let renewed = check(current.clone(), &session, permission).unwrap();
+                assert!(renewed.is_built_from(&current));
+                assert_eq!(renewed.credential_id(), session.credential_id());
+                assert!(renewed.has_permission(Permission::ImapFetch));
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_account_closes_the_session() {
+        // x:Account/set permissions Replace {enabledPermissions: {}} = no permissions at all.
+        let blocked = inner(vec![
+            scope(Permissions::new(), u32::MAX, u64::MAX),
+            scope(Permissions::new(), APP_PASSWORD, u64::MAX),
+        ]);
+        for credential_id in [None, Some(APP_PASSWORD)] {
+            let session = login(active(), credential_id);
+            for permission in [
+                Permission::ImapAuthenticate,
+                Permission::Pop3Authenticate,
+                Permission::SieveAuthenticate,
+            ] {
+                let err = check(blocked.clone(), &session, permission).unwrap_err();
+                assert!(closes_session(&err), "{err:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn removed_protocol_permission_closes_only_that_protocol() {
+        let no_pop3 = inner(vec![scope(
+            perms(&[Permission::Authenticate, Permission::ImapAuthenticate]),
+            u32::MAX,
+            u64::MAX,
+        )]);
+        let session = login(active(), None);
+        assert!(check(no_pop3.clone(), &session, Permission::ImapAuthenticate).is_ok());
+        let err = check(no_pop3, &session, Permission::Pop3Authenticate).unwrap_err();
+        assert!(closes_session(&err), "{err:?}");
+    }
+
+    #[test]
+    fn removed_app_password_closes_the_session() {
+        // The AppPassword was deleted: the rebuilt token has no scope for it.
+        let without_app_password = inner(vec![scope(mail_user(), u32::MAX, u64::MAX)]);
+        let session = login(active(), Some(APP_PASSWORD));
+        let err = check(
+            without_app_password.clone(),
+            &session,
+            Permission::ImapAuthenticate,
+        )
+        .unwrap_err();
+        assert!(closes_session(&err), "{err:?}");
+
+        // A session opened with the primary password is unaffected.
+        let primary = login(active(), None);
+        assert!(check(without_app_password, &primary, Permission::ImapAuthenticate).is_ok());
+    }
+
+    #[test]
+    fn expired_app_password_closes_the_session() {
+        let session = login(active(), Some(APP_PASSWORD));
+        let expired = inner(vec![
+            scope(mail_user(), u32::MAX, u64::MAX),
+            scope(mail_user(), APP_PASSWORD, 1),
+        ]);
+        let err = check(expired, &session, Permission::ImapAuthenticate).unwrap_err();
+        assert!(closes_session(&err), "{err:?}");
+    }
+
+    #[test]
+    fn oauth_token_without_mail_scope_closes_the_session() {
+        let current = active();
+        let session = AccessToken::renew(
+            current.clone(),
+            None,
+            Some(TokenScope::External {
+                scopes: OAuthScopes::MAIL,
+            }),
+            IP,
+        )
+        .unwrap();
+        assert!(check(current.clone(), &session, Permission::ImapAuthenticate).is_ok());
+
+        let err = revalidated_session_token(
+            current,
+            &session,
+            Some(TokenScope::External {
+                scopes: OAuthScopes::CALENDARS,
+            }),
+            IP,
+            Permission::ImapAuthenticate,
+            OAuthScopes::MAIL,
+        )
+        .unwrap_err();
+        assert!(closes_session(&err), "{err:?}");
+    }
+}

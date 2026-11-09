@@ -18,6 +18,19 @@ use trc::SecurityEvent;
 const UNAUTHENTICATED_LITERAL_BYE: &[u8] =
     b"* BYE [TOOBIG] Literal exceeds the maximum size allowed before authentication.\r\n";
 
+// naMailu fork (K5): the account was blocked or deleted, lost IMAP access, or
+// the credential used to log in was removed.
+pub(crate) const ACCESS_REVOKED_BYE: &[u8] =
+    b"* BYE [NOPERM] Access to this account was revoked.\r\n";
+
+/// naMailu fork (K5): an authorization outcome (not a transient store error).
+pub(crate) fn is_access_revoked(err: &trc::Error) -> bool {
+    matches!(
+        err.as_ref(),
+        trc::EventType::Auth(_) | trc::EventType::Security(_)
+    )
+}
+
 impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> SessionResult {
         trc::event!(
@@ -105,6 +118,20 @@ impl<T: SessionStream> Session<T> {
 
         let mut requests = requests.into_iter().peekable();
         while let Some(request) = requests.next() {
+            // naMailu fork (K5): revalidate the session's rights before every
+            // command, so a blocked/deleted account or a removed credential
+            // cannot keep using a connection opened before the change.
+            if let Err(err) = self.revalidate_session(&request).await {
+                match err {
+                    Some(err) => {
+                        if !self.write_error(err).await {
+                            return SessionResult::Close;
+                        }
+                        continue;
+                    }
+                    None => return SessionResult::Close,
+                }
+            }
             let request = match self.is_allowed(request).await {
                 Ok(request) => request,
                 Err(err) => {
@@ -358,12 +385,36 @@ pub fn group_requests(
 }
 
 impl<T: SessionStream> Session<T> {
+    /// naMailu fork (K5): `Err(None)` = access revoked, `* BYE` was sent and
+    /// the connection must be closed; `Err(Some(err))` = transient failure
+    /// (e.g. store unavailable), the command is answered with NO and skipped.
+    async fn revalidate_session(
+        &self,
+        request: &Request<Command>,
+    ) -> Result<(), Option<trc::Error>> {
+        let (State::Authenticated { data } | State::Selected { data, .. }) = &self.state else {
+            return Ok(());
+        };
+        match data.revalidate().await {
+            Ok(()) => Ok(()),
+            Err(err) if is_access_revoked(&err) => {
+                trc::error!(
+                    err.span_id(self.session_id)
+                        .details("IMAP session access revoked, closing connection.")
+                );
+                self.write_bytes(ACCESS_REVOKED_BYE).await.ok();
+                Err(None)
+            }
+            Err(err) => Err(Some(err.id(request.tag.clone()))),
+        }
+    }
+
     async fn is_allowed(&self, request: Request<Command>) -> trc::Result<Request<Command>> {
         let state = &self.state;
         if let State::Authenticated { data } | State::Selected { data, .. } = state
             && let Err(err) = self
                 .server
-                .is_imap_request_allowed(&data.access_token)
+                .is_imap_request_allowed(&data.access_token())
                 .await
         {
             return Err(err.id(request.tag));

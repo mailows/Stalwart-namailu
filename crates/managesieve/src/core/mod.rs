@@ -12,6 +12,7 @@ use std::{borrow::Cow, net::IpAddr, sync::Arc};
 use common::{
     Inner, Server,
     auth::AccessToken,
+    cache::http_auth::RevocationEpoch,
     network::{ServerInstance, limiter::InFlight},
 };
 
@@ -38,6 +39,8 @@ pub enum State {
     Authenticated {
         access_token: AccessToken,
         in_flight: Option<InFlight>,
+        // naMailu fork (K5): grant revocation epoch seen by the last revalidation.
+        revocation_epoch: RevocationEpoch,
     },
 }
 

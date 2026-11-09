@@ -136,6 +136,10 @@ impl<T: SessionStream> Session<T> {
         bearer: Option<BearerMechanism>,
     ) -> trc::Result<()> {
         // Authenticate
+        // naMailu fork (K5): the grant revocation epoch is read before the
+        // credentials are checked, so a revocation racing the login is seen by
+        // the first per-command revalidation.
+        let revocation_epoch = self.server.inner.cache.grant_revocations.epoch();
         let request = AuthRequest::from_credentials(credentials, self.session_id, self.remote_addr);
         let access_token = match self.server.authenticate(&request).await {
             Ok(authenticated) => match bearer {
@@ -194,7 +198,7 @@ impl<T: SessionStream> Session<T> {
         // Create session
         self.state = State::Authenticated {
             data: Arc::new(
-                SessionData::new(self, access_token, in_flight)
+                SessionData::new(self, access_token, revocation_epoch, in_flight)
                     .await
                     .map_err(|err| err.id(tag.clone()))?,
             ),
